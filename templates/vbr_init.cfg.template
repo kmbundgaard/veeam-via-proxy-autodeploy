@@ -1,0 +1,33 @@
+# =============================================================================
+# vbr_init.cfg.template  -  Veeam appliance unattended Initial Configuration answer file
+# =============================================================================
+# SHARED across every node of a run. Rendered once by Initialize-IsoWorkspace and embedded
+# (comment lines stripped) into each node's kickstart %post, which writes it to
+# /etc/veeam/vbr_init.cfg. Applied at first boot by veeam-init.service:
+#     /opt/veeam/hostmanager/veeamhostmanager --apply_init_config /etc/veeam/vbr_init.cfg
+#
+# Keys: Veeam Help Center, "Automating Installation with Initial Configuration" (page content
+# applies to build 13.1.1.18). The applianceRole.* lines are the 13.1 VIA role selector (the
+# 13.1 ISO has ONE unified boot menu; the role is chosen by the init wizard / this file). They
+# are not on the public page - taken from the 13.1 ISO via community tooling; confirm in the lab.
+#
+# Tokens (double curly braces) come from -ApplianceSecretsFile (validated by Test-ApplianceSecrets) and from
+# the -ApplianceRole parameter. Rules enforced before any ISO is built:
+#   passwords  >= 15 chars, upper+lower+digit+special, max 4 same-class chars in a row, admin != so
+#   MFA seeds  16-char Base32 (required only for an account whose MFA is enabled)
+#   recovery   hex GUID (New-Guid), required when the Security Officer account is enabled
+#   ntp        one or more servers separated by ';' (no NTS servers)
+# -----------------------------------------------------------------------------
+veeamadmin.password={{VEEAMADMIN_PASSWORD}}
+veeamadmin.mfaSecretKey={{VEEAMADMIN_MFA_SECRET}}
+veeamadmin.isMfaEnabled={{VEEAMADMIN_MFA_ENABLED}}
+veeamso.password={{VEEAMSO_PASSWORD}}
+veeamso.mfaSecretKey={{VEEAMSO_MFA_SECRET}}
+veeamso.isMfaEnabled={{VEEAMSO_MFA_ENABLED}}
+veeamso.recoveryToken={{VEEAMSO_RECOVERY_TOKEN}}
+veeamso.isEnabled={{VEEAMSO_ENABLED}}
+ntp.servers={{NTP_SERVERS}}
+ntp.runSync={{NTP_RUNSYNC}}
+{{APPLIANCE_ROLE_LINES}}
+vbr_control.runInitIso={{VBR_RUNINITISO}}
+vbr_control.runStart={{VBR_RUNSTART}}

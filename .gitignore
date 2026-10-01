@@ -1,0 +1,10 @@
+.DS_Store
+# Never commit secrets, settings, media or run output
+*.enc
+*.cred
+*.key
+*.iso
+*.log
+*.conf
+!appliance-secrets.example.conf
+DeployReport_*

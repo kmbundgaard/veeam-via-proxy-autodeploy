@@ -1,0 +1,12 @@
+# =============================================================================
+# network-line-nic2.template  -  the SECOND network line, rows with ip2 / netmask2 / portgroup2
+# =============================================================================
+# Rendered per CSV row by Get-PatchedApplianceConfigs and written into the VIA's %pre heredoc right
+# after the first (management) line. DEVICE is the literal ${VAD_NIC2}: the build inserts a small
+# discovery block into %pre that names both adapters by PCI order at install time (adapter 1 of
+# the VM = NIC 1), so nothing here guesses ens192 / ens224 style names.
+# No gateway, no DNS and --nodefroute: NIC 1 keeps the only default route (two default routes
+# would break the appliance's reachability). Typical use: a backup / storage network.
+# Tokens: DEVICE IP2 NETMASK2
+# -----------------------------------------------------------------------------
+network --bootproto=static --device={{DEVICE}} --ip={{IP2}} --netmask={{NETMASK2}} --nodefroute --onboot=yes --activate

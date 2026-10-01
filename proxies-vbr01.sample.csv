@@ -1,0 +1,5 @@
+vbr,hostname,ip,netmask,gateway,dns,cluster,datastore,folder,portgroup,role,tasks
+vbr01,prx-cl-prod01-01.lab.local,10.10.1.11,255.255.255.0,10.10.1.1,10.10.1.53,CL-Prod01,DS-Backup01,Veeam-Proxies,DPG-Backup,viproxy,12
+vbr01,prx-cl-prod01-02.lab.local,10.10.1.12,255.255.255.0,10.10.1.1,10.10.1.53,CL-Prod01,SDRS-Backup,Veeam-Proxies,DPG-Backup,viproxy,12
+vbr01,prx-cl-prod02-01.lab.local,10.10.1.13,255.255.255.0,10.10.1.1,10.10.1.53,CL-Prod02,DS-Backup02,Veeam-Proxies,DPG-Backup,viproxy,12
+vbr01,prx-cl-prod02-02.lab.local,10.10.1.14,255.255.255.0,10.10.1.1,10.10.1.53,CL-Prod02,SDRS-Backup,Veeam-Proxies,DPG-Backup,viproxy,12

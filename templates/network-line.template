@@ -1,0 +1,11 @@
+# =============================================================================
+# network-line.template  -  the ONE per-node line swapped into /proxy-ks.cfg
+# =============================================================================
+# The 13.1 VIA kickstart renders its network line in %pre as
+#     network --bootproto=dhcp --nodns --hostname=vinf-${MACH_HASH}
+# Get-PatchedApplianceConfigs replaces that line with the first non-comment line below, rendered
+# per CSV row. Syntax follows Veeam Help Center "Setting Static IP Address" (Automating
+# Installation with Initial Configuration). DNS may be a comma-separated list.
+# Tokens: HOSTNAME IP NETMASK GATEWAY DNS
+# -----------------------------------------------------------------------------
+network --bootproto=static --ip={{IP}} --netmask={{NETMASK}} --gateway={{GATEWAY}} --nameserver={{DNS}} --hostname={{HOSTNAME}}

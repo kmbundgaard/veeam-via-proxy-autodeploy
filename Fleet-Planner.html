@@ -1,0 +1,1062 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Proxy Fleet Planner</title>
+<meta name="description" content="Offline planner for the Veeam v13.1 Infrastructure Appliance proxy fleet: build, validate and export the CSV that Deploy-VeeamProxies.ps1 consumes, and generate the per-VBR command lines.">
+<style>
+  :root {
+    --ground: #f4f7f4;
+    --surface: #ffffff;
+    --surface-2: #eef3ef;
+    --ink: #17221b;
+    --ink-2: #4f5d55;
+    --muted: #7a877f;
+    --line: #d7e0da;
+    --line-2: #c3cfc7;
+    --accent: #0b7a3b;
+    --accent-ink: #ffffff;
+    --accent-soft: #dff1e5;
+    --warn: #a4680f;
+    --warn-soft: #fbf1d9;
+    --bad: #b3261e;
+    --bad-soft: #fbe3e1;
+    --focus: #0b7a3b;
+    --shadow: 0 1px 2px rgba(23, 34, 27, .06), 0 8px 24px -16px rgba(23, 34, 27, .25);
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0f1411; --surface: #161d19; --surface-2: #1c2520; --ink: #e6ede8; --ink-2: #b4c0b8;
+      --muted: #85948b; --line: #29342e; --line-2: #37453d; --accent: #3fc274; --accent-ink: #062611;
+      --accent-soft: #163a25; --warn: #e0a83f; --warn-soft: #3a2d12; --bad: #f28b82; --bad-soft: #43201d;
+      --focus: #3fc274; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.8);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0f1411; --surface: #161d19; --surface-2: #1c2520; --ink: #e6ede8; --ink-2: #b4c0b8;
+    --muted: #85948b; --line: #29342e; --line-2: #37453d; --accent: #3fc274; --accent-ink: #062611;
+    --accent-soft: #163a25; --warn: #e0a83f; --warn-soft: #3a2d12; --bad: #f28b82; --bad-soft: #43201d;
+    --focus: #3fc274; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px -18px rgba(0,0,0,.8);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; }
+  body {
+    background: var(--ground); color: var(--ink); font: 14px/1.45 var(--sans);
+    padding-inline: 16px; padding-block: 0 48px;
+  }
+  h1, h2, h3 { margin: 0; line-height: 1.2; text-wrap: balance; }
+  h1 { font-size: 20px; font-weight: 650; letter-spacing: -.01em; }
+  h2 { font-size: 15px; font-weight: 650; }
+  h3 { font-size: 13px; font-weight: 650; color: var(--ink-2); text-transform: uppercase; letter-spacing: .06em; }
+  p { margin: 0; }
+  a { color: var(--accent); }
+  code, pre, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  code { font-size: 12.5px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+  pre { margin: 0; font-size: 12.5px; line-height: 1.5; white-space: pre; overflow-x: auto; padding: 12px 14px; background: var(--surface-2); border-radius: 8px; border: 1px solid var(--line); }
+  .muted { color: var(--muted); }
+  .small { font-size: 12.5px; }
+
+  header.top {
+    position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+    background: var(--ground); border-bottom: 1px solid var(--line);
+    margin-inline: -16px; padding: 12px 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px;
+  }
+  header.top .brand { display: flex; align-items: baseline; gap: 10px; }
+  header.top .brand .ver { color: var(--muted); font-size: 12.5px; }
+  header.top .spacer { flex: 1 1 auto; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line-2); background: var(--surface); font-size: 12.5px; white-space: nowrap;
+  }
+  .chip b { font-weight: 650; }
+  .chip.ok { border-color: var(--accent); color: var(--accent); }
+  .chip.warn { background: var(--warn-soft); border-color: transparent; color: var(--warn); }
+  .chip.bad { background: var(--bad-soft); border-color: transparent; color: var(--bad); }
+  .theme { display: inline-flex; border: 1px solid var(--line-2); border-radius: 8px; overflow: hidden; }
+  .theme button { border: 0; background: var(--surface); color: var(--ink-2); padding: 4px 9px; font-size: 12px; cursor: pointer; }
+  .theme button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+
+  main { display: grid; gap: 18px; padding-top: 18px; max-width: 1480px; margin: 0 auto; }
+  .row2 { display: grid; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); gap: 18px; align-items: start; }
+  @media (max-width: 980px) { .row2 { grid-template-columns: minmax(0, 1fr); } }
+
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+  .panel > .head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .panel > .head .grow { flex: 1; }
+  .panel > .body { padding: 14px 16px; display: grid; gap: 12px; }
+
+  .banner { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; border-radius: 10px; background: var(--accent-soft); color: var(--ink); border: 1px solid transparent; }
+  .banner .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); margin-top: 6px; flex: none; }
+
+  form.gen { display: grid; gap: 10px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  label.f { display: grid; gap: 4px; font-size: 12px; color: var(--ink-2); }
+  label.f span.l { font-weight: 600; letter-spacing: .01em; }
+  input[type=text], input[type=number], select, textarea {
+    width: 100%; font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line-2); border-radius: 7px; padding: 6px 8px;
+  }
+  input.mono, textarea.mono { font-family: var(--mono); font-size: 12.5px; }
+  input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+  textarea { min-height: 110px; resize: vertical; }
+  .hint { font-size: 12px; color: var(--muted); }
+
+  button.btn {
+    font: inherit; font-weight: 600; font-size: 13px; border-radius: 8px; padding: 7px 12px; cursor: pointer;
+    border: 1px solid var(--line-2); background: var(--surface); color: var(--ink);
+  }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  button.btn.quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
+  button.btn.danger { color: var(--bad); }
+  button.btn:disabled { opacity: .5; cursor: not-allowed; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .fileb { position: relative; overflow: hidden; }
+  .fileb input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+  .tablewrap { overflow-x: auto; border-top: 1px solid var(--line); }
+  table.fleet { border-collapse: collapse; width: 100%; min-width: 1720px; font-size: 12.5px; }
+  table.fleet th, table.fleet td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+  table.fleet th { position: sticky; top: 0; background: var(--surface-2); color: var(--ink-2); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; white-space: nowrap; z-index: 1; }
+  table.fleet td input { width: 100%; min-width: 0; border: 1px solid transparent; background: transparent; padding: 4px 6px; border-radius: 5px; font: inherit; color: var(--ink); }
+  table.fleet td input.mono { font-family: var(--mono); }
+  table.fleet td input:hover { border-color: var(--line); }
+  table.fleet td input:focus { background: var(--surface); border-color: var(--line-2); }
+  table.fleet td.n { color: var(--muted); font-family: var(--mono); font-size: 11.5px; text-align: right; width: 36px; }
+  table.fleet td.st { width: 92px; }
+  table.fleet td.ops { white-space: nowrap; width: 76px; }
+  table.fleet td.ops button { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; padding: 2px 5px; border-radius: 5px; }
+  table.fleet td.ops button:hover { background: var(--surface-2); color: var(--ink); }
+  table.fleet tr.has-bad td.st .chip { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
+  table.fleet tr.has-warn td.st .chip { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+  table.fleet tr.is-ok td.st .chip { color: var(--accent); border-color: var(--accent); }
+  table.fleet td.st .chip { cursor: help; }
+  table.fleet tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
+  .col-w-vbr { width: 72px; } .col-w-host { width: 220px; } .col-w-ip { width: 122px; } .col-w-mask { width: 122px; }
+  .col-w-gw { width: 122px; } .col-w-dns { width: 168px; } .col-w-cl { width: 124px; } .col-w-ds { width: 134px; }
+  .col-w-fold { width: 124px; } .col-w-pg { width: 124px; } .col-w-role { width: 80px; } .col-w-tasks { width: 56px; } .col-w-hs { width: 96px; }
+
+  ul.issues { margin: 0; padding-left: 18px; display: grid; gap: 3px; font-size: 12.5px; }
+  ul.issues li.bad { color: var(--bad); } ul.issues li.warn { color: var(--warn); }
+  ul.issues code { font-size: 11.5px; }
+  .empty { padding: 28px 16px; text-align: center; color: var(--muted); }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .stat { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--surface-2); }
+  .stat .k { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .stat .v { font-size: 18px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat .s { font-size: 12px; color: var(--ink-2); }
+  table.vbrs { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  table.vbrs th, table.vbrs td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; }
+  table.vbrs th { font-size: 11.5px; color: var(--ink-2); text-transform: uppercase; letter-spacing: .05em; }
+  table.vbrs td input { width: 100%; }
+  table.vbrs td.num { text-align: right; font-family: var(--mono); }
+
+  .cmdblock { display: grid; gap: 8px; }
+  .cmdblock .cmdhead { display: flex; align-items: center; gap: 8px; }
+  .cmdblock .cmdhead .t { font-weight: 600; font-size: 13px; }
+  .cmdblock .cmdhead .grow { flex: 1; }
+  .opts { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; font-size: 12.5px; }
+  .opts label { display: inline-flex; gap: 6px; align-items: center; }
+  .toast { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--ink); color: var(--ground); padding: 8px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .15s; pointer-events: none; z-index: 20; }
+  .toast.show { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { .toast { transition: none; } }
+  details.help summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--ink-2); }
+  details.help .body { padding-top: 8px; display: grid; gap: 6px; font-size: 12.5px; color: var(--ink-2); }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <h1>Proxy Fleet Planner</h1>
+    <span class="ver">Veeam Infrastructure Appliance 13.1 · feeds <code>Deploy-VeeamProxies.ps1</code></span>
+  </div>
+  <div class="spacer"></div>
+  <div class="chips" id="summaryChips" aria-live="polite"></div>
+  <div class="theme" role="group" aria-label="Theme">
+    <button type="button" data-theme-choice="system" aria-pressed="true">System</button>
+    <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
+    <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+  </div>
+</header>
+
+<main>
+  <div class="banner" id="exampleBanner" hidden>
+    <span class="dot"></span>
+    <p><b>Example rows loaded.</b> These four proxies are placeholders from <code>proxies-vbr01.sample.csv</code>. Replace them with your fleet, or clear the table and generate nodes from the panel on the left. Everything stays in this browser; nothing is sent anywhere.</p>
+  </div>
+
+  <div class="row2">
+    <!-- LEFT: generator + sizing -->
+    <div style="display:grid;gap:18px;">
+      <section class="panel" aria-labelledby="genH">
+        <div class="head"><h2 id="genH">Add nodes</h2><span class="grow"></span><span class="muted small">one VBR at a time</span></div>
+        <div class="body">
+          <form class="gen" id="genForm" autocomplete="off">
+            <div class="grid2">
+              <label class="f"><span class="l">VBR key</span><input type="text" id="g_vbr" class="mono" value="vbr01" placeholder="vbr01"></label>
+              <label class="f"><span class="l">Count</span><input type="number" id="g_count" min="1" max="200" value="5"></label>
+            </div>
+            <div class="grid3">
+              <label class="f"><span class="l">Namespace (name prefix)</span><input type="text" id="g_namespace" class="mono" value="prx" placeholder="prx"></label>
+              <label class="f"><span class="l">Hostname pattern</span><input type="text" id="g_pattern" class="mono" value="{namespace}-{nn}" placeholder="{namespace}-{nn}"></label>
+              <label class="f"><span class="l">Start index</span><input type="number" id="g_start" min="0" max="999" value="1"></label>
+            </div>
+            <p class="hint"><code>{namespace}</code> = the free-text prefix on the left, so the customer's own naming standard applies (lower-cased; spaces and other characters not allowed in a host name become <code>-</code>). <code>{nn}</code> = two-digit index, <code>{nnn}</code> = three-digit, <code>{n}</code> = plain index. Optional: <code>{cluster}</code> (the VMware cluster below) and <code>{vbr}</code> (the VBR key). Add a domain suffix for FQDNs, e.g. <code>{namespace}-{nn}.corp.example</code>. Keep the part before the first dot within 15 characters (NetBIOS); the table warns when it is longer. The start index continues an existing series that matches the pattern.</p>
+            <div class="grid2">
+              <label class="f"><span class="l">First IP</span><input type="text" id="g_ip" class="mono" value="10.10.1.11" placeholder="10.10.1.11"></label>
+              <label class="f"><span class="l">Netmask</span><input type="text" id="g_mask" class="mono" value="255.255.255.0"></label>
+            </div>
+            <div class="grid2">
+              <label class="f"><span class="l">Gateway</span><input type="text" id="g_gw" class="mono" value="10.10.1.1"></label>
+              <label class="f"><span class="l">DNS (comma-separated)</span><input type="text" id="g_dns" class="mono" value="10.10.1.53"></label>
+            </div>
+            <div class="grid2">
+              <label class="f"><span class="l">vSphere cluster</span><input type="text" id="g_cluster" value="CL-Prod01" list="dl_cluster"></label>
+              <label class="f"><span class="l">Datastore or SDRS cluster</span><input type="text" id="g_ds" value="DS-Backup01" list="dl_datastore"></label>
+            </div>
+            <div class="grid2">
+              <label class="f"><span class="l">VM folder (optional)</span><input type="text" id="g_folder" value="Veeam-Proxies" list="dl_folder"></label>
+              <label class="f"><span class="l">Port group</span><input type="text" id="g_pg" value="DPG-Backup" list="dl_portgroup"></label>
+            </div>
+            <details style="margin:4px 0;">
+              <summary class="small">Second network adapter (optional: backup / storage network, no default route)</summary>
+              <div class="grid3" style="margin-top:8px;">
+                <label class="f"><span class="l">First IP (NIC 2)</span><input type="text" id="g_ip2" class="mono" value="" placeholder="10.20.1.11"></label>
+                <label class="f"><span class="l">Netmask (NIC 2)</span><input type="text" id="g_mask2" class="mono" value="" placeholder="255.255.255.0"></label>
+                <label class="f"><span class="l">Port group (NIC 2)</span><input type="text" id="g_pg2" value="" list="dl_portgroup" placeholder="DPG-Storage"></label>
+              </div>
+              <p class="hint">Fills columns <code>ip2</code>, <code>netmask2</code>, <code>portgroup2</code> (IP counts up per node). The VM gets a second adapter; the installer gives it a static address without gateway or DNS, NIC 1 keeps the default route. Leave the IP empty for one adapter.</p>
+            </details>
+            <div class="grid2">
+              <label class="f"><span class="l">Task slots per proxy</span><input type="number" id="g_tasks" min="1" max="100" value="12"></label>
+              <label class="f"><span class="l">Role</span><select id="g_role"><option value="viproxy">viproxy (VMware Linux proxy)</option><option value="gateway">gateway (Data Domain / StoreOnce gateway server)</option><option value="viproxy+gateway">viproxy+gateway (both)</option></select></label>
+            </div>
+            <label class="f" id="g_gwrepo_f" hidden><span class="l">Gateway for repositories (optional, <code>;</code>-separated)</span><input type="text" id="g_gwrepo" placeholder="DD-Repo01;StoreOnce-Repo01" aria-describedby="g_gwrepo_h"><span class="hint" id="g_gwrepo_h">Existing Dell Data Domain or HPE StoreOnce repositories. Empty = the appliance is only added as a managed server and can be picked as gateway in the repository settings.</span></label>
+            <div class="actions">
+              <button type="submit" class="btn primary" id="btnAdd">Add nodes</button>
+              <button type="button" class="btn quiet" id="btnFillFromRow">Copy settings from selected VBR</button>
+            </div>
+            <p class="hint" id="genPreview"></p>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="sizeH">
+        <div class="head"><h2 id="sizeH">Per-proxy sizing</h2><span class="grow"></span><span class="muted small">project default 6 / 12 / 120, no data disk</span></div>
+        <div class="body">
+          <div class="grid3">
+            <label class="f"><span class="l">vCPU</span><input type="number" id="s_cpu" min="2" max="64" value="6"></label>
+            <label class="f"><span class="l">RAM GB</span><input type="number" id="s_ram" min="8" max="512" value="12"></label>
+            <label class="f"><span class="l">Disk GB</span><input type="number" id="s_disk" min="120" max="4096" value="120"></label>
+          </div>
+          <label class="f"><span class="l">Extra data disk GB (0 = none)</span><input type="number" id="s_data" min="0" max="65536" value="0" aria-describedby="s_data_h"><span class="hint" id="s_data_h">Above 0 the VMs get a second thin disk and the ISO uses Veeam's "Standard (Multi-Disk) Deployment" install instead of single-disk (<code>-MultiDisk -VmDataDiskGB</code>). Veeam lists 120 GB or more for the data disk.</span></label>
+          <p class="hint">Veeam minimum for the appliance is 2 cores / 8 GB / 120 GB. Rows with more than 2 task slots per vCPU get a warning; the classic rule of thumb is about 1 core and 2 GB RAM per concurrent task.</p>
+        </div>
+      </section>
+
+      <details class="help panel" style="padding:12px 16px;">
+        <summary>How this fits the deployment</summary>
+        <div class="body">
+          <p>1. Build the fleet here. Fix every red issue; amber ones are judgement calls.</p>
+          <p>2. Export the CSV and copy it, the base 13.1 ISO and one settings file per VBR to the deploy host.</p>
+          <p>3. Run the generated <b>Validate</b> command first, then <b>What-if</b>, then the real run, one VBR at a time.</p>
+          <p>The CSV columns are exactly what <code>Deploy-VeeamProxies.ps1</code> reads. Optional columns are exported only when a row uses them: <code>ip2</code>, <code>netmask2</code>, <code>portgroup2</code> (a second network adapter with a static address and no default route; all three together), <code>gatewayrepo</code> (for role <code>gateway</code> or <code>viproxy+gateway</code>: existing Dell Data Domain / HPE StoreOnce repositories, <code>;</code>-separated, whose gateway server list gets this appliance), <code>handshakecode</code> (an appliance re-homed from another VBR) and <code>vbrname</code> (the FQDN or IP the VBR should use to add the proxy when it differs from the kickstart hostname, for example when DNS has no record yet).</p>
+        </div>
+      </details>
+    </div>
+
+    <!-- RIGHT: fleet table -->
+    <section class="panel" aria-labelledby="fleetH">
+      <div class="head">
+        <h2 id="fleetH">Fleet</h2>
+        <span class="muted small" id="fleetCount"></span>
+        <span class="grow"></span>
+        <div class="actions">
+          <label class="btn fileb">Import CSV<input type="file" id="fileImport" accept=".csv,text/csv" aria-label="Import CSV file"></label>
+          <button type="button" class="btn" id="btnPaste">Paste CSV</button>
+          <button type="button" class="btn" id="btnSort">Sort by VBR, host</button>
+          <label class="small" style="display:inline-flex;gap:6px;align-items:center;"><input type="checkbox" id="showHs"> optional columns (handshakecode, vbrname, gatewayrepo, ip2, netmask2, portgroup2)</label>
+          <button type="button" class="btn quiet danger" id="btnClear">Clear all</button>
+        </div>
+      </div>
+      <div id="pasteBox" class="body" hidden>
+        <label class="f"><span class="l">Paste CSV text (header row required)</span><textarea id="pasteArea" class="mono" placeholder="vbr,hostname,ip,netmask,gateway,dns,cluster,datastore,folder,portgroup,role,tasks"></textarea></label>
+        <div class="actions"><button type="button" class="btn primary" id="btnPasteImport">Import pasted rows</button><button type="button" class="btn quiet" id="btnPasteCancel">Cancel</button><span class="hint">Rows are appended; duplicates show up in the validation list.</span></div>
+      </div>
+      <div class="tablewrap">
+        <table class="fleet" id="fleetTable">
+          <thead>
+            <tr>
+              <th class="n">#</th><th class="st">Status</th>
+              <th class="col-w-vbr">vbr</th><th class="col-w-host">hostname</th><th class="col-w-ip">ip</th><th class="col-w-mask">netmask</th>
+              <th class="col-w-gw">gateway</th><th class="col-w-dns">dns</th><th class="col-w-cl">cluster</th><th class="col-w-ds">datastore</th>
+              <th class="col-w-fold">folder</th><th class="col-w-pg">portgroup</th><th class="col-w-role">role</th><th class="col-w-tasks">tasks</th>
+              <th class="col-w-hs hs" hidden>handshakecode</th><th class="col-w-host hs" hidden>vbrname</th><th class="col-w-host hs" hidden>gatewayrepo</th><th class="col-w-ip hs" hidden>ip2</th><th class="col-w-mask hs" hidden>netmask2</th><th class="col-w-pg hs" hidden>portgroup2</th><th class="ops"></th>
+            </tr>
+          </thead>
+          <tbody id="fleetBody"></tbody>
+        </table>
+        <div class="empty" id="emptyMsg" hidden>No nodes yet. Generate some on the left or import a CSV.</div>
+      </div>
+      <div class="body">
+        <h3>Validation</h3>
+        <ul class="issues" id="issueList"></ul>
+      </div>
+    </section>
+  </div>
+
+  <!-- Totals per VBR -->
+  <section class="panel" aria-labelledby="totH">
+    <div class="head"><h2 id="totH">Per-VBR totals and connection settings</h2><span class="grow"></span><span class="muted small">a VIA binds to exactly one VBR</span></div>
+    <div class="body">
+      <div class="stats" id="fleetStats"></div>
+      <div class="tablewrap" style="border-top:0;">
+        <table class="vbrs" id="vbrTable">
+          <thead><tr><th>VBR key</th><th class="num">Proxies</th><th class="num">Task slots</th><th class="num">vCPU</th><th class="num">RAM GB</th><th class="num">Disk GB (thin)</th><th>VBR server (FQDN/IP)</th><th>VBR user (password prompted)</th><th>Settings file</th><th>VBR MFA seed file (optional)</th></tr></thead>
+          <tbody id="vbrBody"></tbody>
+        </table>
+      </div>
+      <p class="hint">Size to concurrent task slots and repository throughput, not raw VM count. Fewer, larger proxies are often better than 100 small ones.</p>
+    </div>
+  </section>
+
+  <!-- Export -->
+  <section class="panel" aria-labelledby="expH">
+    <div class="head"><h2 id="expH">Export CSV</h2><span class="grow"></span>
+      <div class="actions">
+        <label class="small" style="display:inline-flex;gap:6px;align-items:center;">Scope <select id="expScope"></select></label>
+        <button type="button" class="btn" id="btnCopyCsv">Copy CSV</button>
+        <button type="button" class="btn primary" id="btnDownload">Download CSV</button>
+      </div>
+    </div>
+    <div class="body">
+      <pre id="csvPreview" aria-label="CSV preview"></pre>
+      <p class="hint" id="csvNote"></p>
+    </div>
+  </section>
+
+  <!-- Commands -->
+  <section class="panel" aria-labelledby="cmdH">
+    <div class="head"><h2 id="cmdH">Run commands</h2><span class="grow"></span><span class="muted small">one VBR at a time</span></div>
+    <div class="body">
+      <div class="grid3">
+        <label class="f"><span class="l">CSV file name on the deploy host</span><input type="text" id="c_csv" class="mono" value="proxies.csv"></label>
+        <label class="f"><span class="l">Base ISO (13.1 Infrastructure Appliance)</span><input type="text" id="c_iso" class="mono" value="VeeamInfrastructureAppliance_13.1.1.18_20260825.iso"></label>
+        <label class="f"><span class="l">vCenter (FQDN/IP)</span><input type="text" id="c_vc" class="mono" value="vc01.example.local"></label>
+        <label class="f"><span class="l">vCenter user (password is prompted at run time)</span><input type="text" id="c_vcuser" class="mono" value="administrator@vsphere.local"></label>
+        <label class="f"><span class="l">AD DNS server for New-ProxyDnsRecords.ps1 (optional; Windows admin host)</span><input type="text" id="c_dns" class="mono" value="" placeholder="dc01.example.local"></label>
+      </div>
+      <div class="opts">
+        <label><input type="checkbox" id="c_tls" checked> <span>Skip TLS verify on <code>:9419</code> (self-signed)</span></label>
+        <label><input type="checkbox" id="c_rb" checked> <span>Rollback on failure</span></label>
+        <label><input type="checkbox" id="c_isoonly"> <span>No vCenter access: build the ISO(s) only, someone else creates the VMs</span></label>
+        <label><input type="checkbox" id="c_single" checked> <span>ISO only: one ISO for all nodes (pick the node in the boot menu)</span></label>
+        <label><input type="checkbox" id="c_logs"> <span>Logs on disk 2: set the appliance's <b>Logs location</b> (Host Management Console setting) to the data volume on the extra disk, <code>/var/lib/veeam/VeeamBackupLogFolder</code>, instead of disk 1 <span class="small muted">(VBR "Export logs" does not collect them there - use the support bundle in the appliance web UI)</span></span></label>
+        <label><input type="checkbox" id="c_replace"> <span>Replace existing proxies: capture job pinning, remove from VBR, redeploy, re-pin (old VM is powered off and renamed)</span></label>
+        <label>While replacing, jobs pinned only to that proxy are <select id="c_replacePolicy"><option value="Auto">switched to automatic selection</option><option value="Disable">disabled until it is back</option></select></label>
+        <label>Transport <select id="c_tm"><option>Auto</option><option>HotAdd</option><option>Nbd</option><option>DirectStorageAccess</option></select></label>
+        <label>Appliance role <select id="c_role"><option value="InfrastructureServerIscsi">Infrastructure Server with iSCSI/FC/NVMe-oF</option><option value="InfrastructureServer">Infrastructure Server</option></select></label>
+        <label>Shell <select id="c_shell"><option value="bash">Linux deploy host (bash)</option><option value="pwsh">Windows (PowerShell)</option></select></label>
+      </div>
+      <div id="cmdOut" style="display:grid;gap:16px;"></div>
+      <p class="hint">Order per VBR: <b>Validate</b> (offline, also dry-runs the kickstart and grub patch when the ISO is present) → <b>What-if</b> (connects, changes nothing) → <b>Deploy + register</b>. With <b>No vCenter access</b>: Validate → build the ISO(s) → hand the ISO and the VM build sheet (<code>*-VM-SPEC.txt</code>) to the vSphere team → Register. Passwords are never in the commands: with a user name given, the script prompts for that password at run time; leave the user empty to be asked for both. Encrypted credential files (<code>Protect-DeploymentSecrets.ps1</code>) are the non-interactive alternative. The MFA seed file is only needed when the VBR service account is MFA-enforced.</p>
+    </div>
+  </section>
+
+  <!-- Deployment server panel: shown only when this page is served by Start-DeploymentServer.ps1 -->
+  <section class="panel" id="serverPanel" hidden aria-labelledby="srvH">
+    <div class="head"><h2 id="srvH">Deploy from this server</h2><span class="muted small" id="srvInfo"></span><span class="grow"></span><span class="chip ok">server connected</span></div>
+    <div class="body">
+      <div class="grid3">
+        <label class="f"><span class="l">VBR key (which rows to run)</span><select id="r_vbr"></select></label>
+        <label class="f"><span class="l">Mode</span><select id="r_mode">
+          <option value="Validate">1 · Validate (offline dry run)</option>
+          <option value="WhatIf">2 · What-if (connects, changes nothing)</option>
+          <option value="DeployOnly">Deploy only (no registration)</option>
+          <option value="Full">3 · Deploy + register</option>
+          <option value="RegisterOnly">Register only (VMs already exist)</option>
+          <option value="Rollback">Rollback (removes from VBR and DELETES the VMs)</option>
+          <option value="IsoPerNode">ISO only · one ISO per node (no vCenter, no VBR)</option>
+          <option value="IsoSingle">ISO only · one ISO for all nodes, pick in the boot menu</option>
+          <option value="IsoPrompt">ISO only · generic ISO, asks for name + network at install</option>
+        </select></label>
+        <label class="f"><span class="l">Base ISO (server folder iso/)</span><select id="r_iso"></select></label>
+      </div>
+      <div class="grid3">
+        <label class="f"><span class="l">Appliance settings file on the server (veeamadmin password, TOTP seed, NTP; from appliance-secrets.example.conf)</span><select id="r_settings"></select><span class="small muted" id="r_settingsInfo"></span></label>
+        <label class="f"><span class="l">Upload a new plaintext appliance settings .conf (the server encrypts it and discards the plaintext)</span><input type="file" id="r_settingsUpload" accept=".conf,.txt"></label>
+        <label class="f"><span class="l">VBR MFA seed file (optional)</span><select id="r_mfa"></select></label>
+      </div>
+      <div class="grid3">
+        <label class="f"><span class="l">vCenter</span><input type="text" id="r_vc" class="mono" autocomplete="off"></label>
+        <label class="f"><span class="l">vCenter user</span><input type="text" id="r_vcuser" class="mono" autocomplete="off"></label>
+        <label class="f"><span class="l">vCenter password</span><input type="password" id="r_vcpass" autocomplete="off"></label>
+      </div>
+      <div class="grid3">
+        <label class="f"><span class="l">VBR server</span><input type="text" id="r_vbrsrv" class="mono" autocomplete="off"></label>
+        <label class="f"><span class="l">VBR user</span><input type="text" id="r_vbruser" class="mono" autocomplete="off"></label>
+        <label class="f"><span class="l">VBR password</span><input type="password" id="r_vbrpass" autocomplete="off"></label>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn" id="r_inv">Load vSphere inventory</button>
+        <button type="button" class="btn" id="r_test">Test connections</button>
+        <button type="button" class="btn primary" id="r_run">Run</button>
+        <span class="small" id="r_testResult"></span>
+        <span class="hint" id="r_hint">Transport mode, appliance role, TLS check and rollback-on-failure are taken from the "Run commands" options above; vCPU, RAM, disks and "logs on disk 2" from the sizing panel. ISO-only modes need no vCenter or VBR: the run view then lists the ISO(s) and the VM build sheet. Passwords are sent to this server only for the run, stored encrypted for its duration and deleted when it ends.</span>
+      </div>
+      <h3>Runs</h3>
+      <div class="tablewrap" style="border-top:0"><table class="vbrs" id="runsTable"><thead><tr><th>Started</th><th>Run</th><th>VBR</th><th>Mode</th><th>State</th><th></th></tr></thead><tbody id="runsBody"></tbody></table></div>
+      <div id="logWrap" hidden>
+        <div class="cmdhead"><span class="t" id="logTitle"></span><span class="grow"></span><button type="button" class="btn quiet small danger" id="logCancel" hidden>Cancel run</button><button type="button" class="btn quiet small" id="logClose">Close</button></div>
+        <pre id="logView" style="max-height:420px;overflow:auto">(no output yet)</pre>
+        <div id="reportWrap"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<datalist id="dl_cluster"></datalist><datalist id="dl_datastore"></datalist><datalist id="dl_folder"></datalist><datalist id="dl_portgroup"></datalist>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+(() => {
+  'use strict';
+  const SCHEMA = ['vbr','hostname','ip','netmask','gateway','dns','cluster','datastore','folder','portgroup','role','tasks'];
+  const HS = 'handshakecode';
+  const VN = 'vbrname';
+  const GR = 'gatewayrepo';
+  const IP2 = 'ip2', NM2 = 'netmask2', PG2 = 'portgroup2';
+  const NIC2 = [IP2, NM2, PG2];                       // second network adapter: all three or none
+  const OPTIONAL = [HS, VN, GR, IP2, NM2, PG2];
+  const ROLES = ['viproxy', 'gateway'];
+  const roleParts = (role) => (role || '').toLowerCase().split(/[+;, ]+/).filter(Boolean);
+  const MONO = new Set(['vbr','hostname','ip','netmask','gateway','dns','tasks',HS,VN,IP2,NM2]);
+  const LS_KEY = 'veeam-fleet-planner-v1';
+  const LISTS = { cluster: 'dl_cluster', datastore: 'dl_datastore', folder: 'dl_folder', portgroup: 'dl_portgroup' };
+  let inv = null;   // vSphere inventory loaded from the deployment server (not persisted)
+  const SAMPLE = [
+    ['vbr01','prx-vbr01-01.lab.local','10.10.1.11','255.255.255.0','10.10.1.1','10.10.1.53','CL-Prod01','DS-Backup01','Veeam-Proxies','DPG-Backup','viproxy','12'],
+    ['vbr01','prx-vbr01-02.lab.local','10.10.1.12','255.255.255.0','10.10.1.1','10.10.1.53','CL-Prod01','SDRS-Backup','Veeam-Proxies','DPG-Backup','viproxy','12'],
+    ['vbr01','prx-vbr01-03.lab.local','10.10.1.13','255.255.255.0','10.10.1.1','10.10.1.53','CL-Prod02','DS-Backup02','Veeam-Proxies','DPG-Backup','viproxy','12'],
+    ['vbr01','prx-vbr01-04.lab.local','10.10.1.14','255.255.255.0','10.10.1.1','10.10.1.53','CL-Prod02','SDRS-Backup','Veeam-Proxies','DPG-Backup','viproxy','12'],
+  ].map(a => Object.fromEntries(SCHEMA.map((k,i) => [k, a[i]])));
+
+  const $ = (id) => document.getElementById(id);
+  const state = { rows: [], vbrs: {}, sizing: { cpu: 6, ram: 12, disk: 120, data: 0 }, showHs: false, example: false };
+
+  // ---------- persistence (per-viewer convenience only) ----------
+  function save() {
+    try {
+      const cmd = { csv: $('c_csv').value, iso: $('c_iso').value, vc: $('c_vc').value, vcuser: $('c_vcuser').value, dns: $('c_dns').value, tls: $('c_tls').checked, rb: $('c_rb').checked, isoOnly: $('c_isoonly').checked, single: $('c_single').checked, logs: $('c_logs').checked, tm: $('c_tm').value, role: $('c_role').value, shell: $('c_shell').value };
+      localStorage.setItem(LS_KEY, JSON.stringify({ rows: state.rows, vbrs: state.vbrs, sizing: state.sizing, showHs: state.showHs, example: state.example, cmd }));
+    } catch (e) { /* storage unavailable: fine */ }
+  }
+  function load() {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return false;
+      const d = JSON.parse(raw);
+      if (!d || !Array.isArray(d.rows)) return false;
+      state.rows = d.rows.map(normRow);
+      state.vbrs = d.vbrs || {};
+      state.sizing = Object.assign({ cpu: 6, ram: 12, disk: 120, data: 0 }, d.sizing || {});
+      state.showHs = !!d.showHs; state.example = !!d.example;
+      if (d.cmd) { $('c_csv').value = d.cmd.csv || 'proxies.csv'; $('c_iso').value = d.cmd.iso || ''; $('c_vc').value = d.cmd.vc || ''; $('c_vcuser').value = d.cmd.vcuser || ''; $('c_dns').value = d.cmd.dns || ''; $('c_tls').checked = !!d.cmd.tls; $('c_rb').checked = !!d.cmd.rb; $('c_isoonly').checked = !!d.cmd.isoOnly; $('c_single').checked = d.cmd.single !== false; $('c_logs').checked = !!d.cmd.logs; $('c_tm').value = d.cmd.tm || 'Auto'; $('c_role').value = d.cmd.role || 'InfrastructureServerIscsi'; $('c_shell').value = d.cmd.shell || 'bash'; }
+      return true;
+    } catch (e) { return false; }
+  }
+  function normRow(r) { const o = {}; for (const k of SCHEMA) o[k] = (r[k] ?? '').toString().trim(); for (const k of OPTIONAL) o[k] = (r[k] ?? '').toString().trim(); return o; }
+
+  // ---------- IPv4 helpers ----------
+  const isIPv4 = (s) => /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(s);
+  const ip2int = (s) => s.split('.').reduce((a, o) => ((a << 8) | parseInt(o, 10)) >>> 0, 0) >>> 0;
+  const int2ip = (n) => [24, 16, 8, 0].map(sh => (n >>> sh) & 255).join('.');
+  function isMask(s) { if (!isIPv4(s)) return false; const n = ip2int(s); if (n === 0) return false; const inv = (~n) >>> 0; return ((inv + 1) & inv) === 0; }
+  const same = (a, b, m) => ((ip2int(a) & ip2int(m)) >>> 0) === ((ip2int(b) & ip2int(m)) >>> 0);
+  const isHost = (s) => /^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/.test(s);
+
+  // ---------- validation ----------
+  function validate() {
+    const rows = state.rows;
+    const addrCount = new Map(); rows.forEach(r => [r.ip, r[IP2]].filter(Boolean).forEach(a => addrCount.set(a, (addrCount.get(a) || 0) + 1)));
+    const perRow = rows.map(() => ({ bad: [], warn: [] }));
+    const hostSeen = new Map(), ipSeen = new Map();
+    rows.forEach((r, i) => {
+      const P = perRow[i];
+      for (const k of ['vbr','hostname','ip','netmask','gateway','cluster','datastore','portgroup']) if (!r[k]) P.bad.push(`${k} is empty`);
+      if (r.hostname) {
+        if (!isHost(r.hostname)) P.bad.push('hostname has invalid characters');
+        if (r.hostname.split('.')[0].length > 15) P.warn.push('short name is longer than 15 characters (NetBIOS limit)');
+        const key = r.hostname.toLowerCase();
+        if (hostSeen.has(key)) { P.bad.push(`duplicate hostname (also row ${hostSeen.get(key) + 1})`); perRow[hostSeen.get(key)].bad.push(`duplicate hostname (also row ${i + 1})`); } else hostSeen.set(key, i);
+      }
+      if (r.ip) {
+        if (!isIPv4(r.ip)) P.bad.push('ip is not a valid IPv4 address');
+        else if (ipSeen.has(r.ip)) { P.bad.push(`duplicate ip (also row ${ipSeen.get(r.ip) + 1})`); perRow[ipSeen.get(r.ip)].bad.push(`duplicate ip (also row ${i + 1})`); } else ipSeen.set(r.ip, i);
+      }
+      if (r.netmask && !isMask(r.netmask)) P.bad.push('netmask is not a valid contiguous mask');
+      if (r.gateway && !isIPv4(r.gateway)) P.bad.push('gateway is not a valid IPv4 address');
+      if (isIPv4(r.ip) && isMask(r.netmask)) {
+        const net = (ip2int(r.ip) & ip2int(r.netmask)) >>> 0, bc = (net | (~ip2int(r.netmask) >>> 0)) >>> 0;
+        if (ip2int(r.netmask) < 0xFFFFFFFE) { if (ip2int(r.ip) === net) P.bad.push('ip is the network address'); if (ip2int(r.ip) === bc) P.bad.push('ip is the broadcast address'); }
+        if (isIPv4(r.gateway) && !same(r.ip, r.gateway, r.netmask)) P.warn.push('gateway is outside the ip/netmask subnet');
+        if (isIPv4(r.gateway) && r.gateway === r.ip) P.bad.push('gateway equals the proxy ip');
+      }
+      if (inv) {
+        if (r.cluster && !inv.clusters.some(c => c.name === r.cluster)) P.bad.push(`cluster "${r.cluster}" is not in the loaded vCenter inventory`);
+        if (r.datastore && !inv.datastores.some(d => d.name === r.datastore) && !inv.datastoreClusters.some(d => d.name === r.datastore)) P.bad.push(`datastore "${r.datastore}" is not in the loaded vCenter inventory`);
+        if (r.folder && !inv.folders.some(f => f.name === r.folder)) P.bad.push(`VM folder "${r.folder}" is not in the loaded vCenter inventory`);
+        if (r.portgroup && !inv.portgroups.some(p => p.name === r.portgroup)) P.bad.push(`port group "${r.portgroup}" is not in the loaded vCenter inventory`);
+      }
+      if (!r.dns) P.warn.push('dns is empty (kickstart --nameserver will be blank)');
+      else { const bad = r.dns.split(',').map(s => s.trim()).filter(s => s && !isIPv4(s)); if (bad.length) P.bad.push(`dns has non-IPv4 entries: ${bad.join(', ')}`); }
+      const parts = roleParts(r.role), isProxy = parts.includes('viproxy'), isGw = parts.includes('gateway');
+      const unknown = parts.filter(x => !ROLES.includes(x));
+      if (unknown.length) P.bad.push(`role "${r.role}" is not valid: use viproxy, gateway or viproxy+gateway`);
+      if (!r.role) P.warn.push('role is empty (the appliance is only added as a managed server)');
+      if (r[GR] && !isGw) P.bad.push('gatewayrepo is set but the role has no gateway (use gateway or viproxy+gateway)');
+      if (isGw && !r[GR]) P.warn.push('gateway without gatewayrepo: the appliance is added as a managed server only; pick it as gateway in the Data Domain / StoreOnce repository settings');
+      const t = Number(r.tasks);
+      if (!isProxy && !r.tasks) { /* gateway-only: no task slots */ }
+      else if (!r.tasks || !Number.isInteger(t) || t < 1 || t > 100) P.bad.push('tasks must be an integer 1–100');
+      else if (t > state.sizing.cpu * 2) P.warn.push(`tasks ${t} is more than 2× the ${state.sizing.cpu} vCPU sizing (heavy oversubscription)`);
+      if (r[HS] && !/^\d{6}$/.test(r[HS])) P.bad.push('handshakecode must be 6 digits');
+      if (r[VN] && !(isIPv4(r[VN]) || isHost(r[VN]))) P.bad.push('vbrname must be an FQDN or IPv4 address the VBR can reach');
+      const n2 = NIC2.filter(k => r[k]);
+      if (n2.length && n2.length < 3) P.bad.push(`second NIC needs ip2, netmask2 and portgroup2 together (given: ${n2.join(', ')})`);
+      if (r[IP2]) {
+        if (!isIPv4(r[IP2])) P.bad.push('ip2 is not a valid IPv4 address');
+        else if (r[IP2] === r.ip) P.bad.push('ip2 equals ip: the two adapters need different addresses');
+        else if (addrCount.get(r[IP2]) > 1) P.bad.push(`ip2 ${r[IP2]} is also used by another row`);
+        if (r[NM2] && !isMask(r[NM2])) P.bad.push('netmask2 is not a valid netmask');
+        if (isIPv4(r[IP2]) && isIPv4(r.ip) && isMask(r.netmask) && same(r.ip, r[IP2], r.netmask)) P.warn.push('ip2 is in the same subnet as ip: two adapters in one network is usually a mistake');
+      }
+      if (!r[VN] && r.hostname && !r.hostname.includes('.')) P.warn.push('no vbrname and the hostname has no domain: the VBR must be able to resolve it, or set vbrname to the IP');
+    });
+    return perRow;
+  }
+
+  // ---------- rendering ----------
+  let lastVal = [];
+  function renderTable() {
+    const tb = $('fleetBody'); tb.innerHTML = '';
+    document.querySelectorAll('th.hs').forEach(th => th.hidden = !state.showHs);
+    $('emptyMsg').hidden = state.rows.length > 0;
+    const frag = document.createDocumentFragment();
+    state.rows.forEach((r, i) => {
+      const tr = document.createElement('tr'); tr.dataset.i = i;
+      tr.innerHTML = `<td class="n">${i + 1}</td><td class="st"><span class="chip" tabindex="0">…</span></td>` +
+        SCHEMA.map(k => `<td><input type="text" data-i="${i}" data-k="${k}" class="${MONO.has(k) ? 'mono' : ''}" value="${esc(r[k])}" aria-label="${k} row ${i + 1}"${LISTS[k] ? ` list="${LISTS[k]}"` : ''}></td>`).join('') +
+        `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${HS}" class="mono" value="${esc(r[HS])}" aria-label="handshakecode row ${i + 1}" placeholder="000000"></td>` +
+        `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${VN}" class="mono" value="${esc(r[VN])}" aria-label="vbrname row ${i + 1}" placeholder="(defaults to hostname)"></td>` +
+        `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${GR}" value="${esc(r[GR])}" aria-label="gatewayrepo row ${i + 1}" placeholder="(gateway rows: DD / StoreOnce repos)"></td>` +
+        `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${IP2}" class="mono" value="${esc(r[IP2])}" aria-label="ip2 row ${i + 1}" placeholder="(2nd NIC)"></td>` +
+        `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${NM2}" class="mono" value="${esc(r[NM2])}" aria-label="netmask2 row ${i + 1}"></td>` +
+        `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${PG2}" value="${esc(r[PG2])}" aria-label="portgroup2 row ${i + 1}" list="dl_portgroup"></td>` +
+        `<td class="ops"><button type="button" data-op="dup" data-i="${i}" title="Duplicate row">⧉</button><button type="button" data-op="del" data-i="${i}" title="Delete row">✕</button></td>`;
+      frag.appendChild(tr);
+    });
+    tb.appendChild(frag);
+    refresh();
+  }
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+
+  function refresh() {
+    lastVal = validate();
+    // row chips
+    const trs = $('fleetBody').children;
+    let nBad = 0, nWarn = 0;
+    lastVal.forEach((v, i) => {
+      const tr = trs[i]; if (!tr) return;
+      const chip = tr.querySelector('.st .chip');
+      tr.classList.remove('has-bad', 'has-warn', 'is-ok');
+      if (v.bad.length) { tr.classList.add('has-bad'); chip.textContent = `${v.bad.length} error${v.bad.length > 1 ? 's' : ''}`; nBad += v.bad.length; }
+      else if (v.warn.length) { tr.classList.add('has-warn'); chip.textContent = `${v.warn.length} warning${v.warn.length > 1 ? 's' : ''}`; nWarn += v.warn.length; }
+      else { tr.classList.add('is-ok'); chip.textContent = 'OK'; }
+      if (!v.bad.length) nWarn += 0; else nWarn += v.warn.length;
+      chip.title = [...v.bad.map(b => '✕ ' + b), ...v.warn.map(w => '⚠ ' + w)].join('\n') || 'No issues';
+    });
+    // issue list
+    const ul = $('issueList'); ul.innerHTML = '';
+    const items = [];
+    lastVal.forEach((v, i) => {
+      const h = state.rows[i].hostname || `row ${i + 1}`;
+      v.bad.forEach(b => items.push(`<li class="bad"><code>${esc(h)}</code> ${esc(b)}</li>`));
+      v.warn.forEach(w => items.push(`<li class="warn"><code>${esc(h)}</code> ${esc(w)}</li>`));
+    });
+    if (!state.rows.length) ul.innerHTML = '<li class="muted">Nothing to validate yet.</li>';
+    else if (!items.length) ul.innerHTML = '<li style="color:var(--accent)">All rows pass. Export when ready.</li>';
+    else ul.innerHTML = items.slice(0, 200).join('') + (items.length > 200 ? `<li class="muted">… ${items.length - 200} more</li>` : '');
+    $('fleetCount').textContent = state.rows.length ? `${state.rows.length} node${state.rows.length > 1 ? 's' : ''}` : '';
+    renderSummary(nBad, nWarn);
+    renderVbrTable();
+    renderCsv();
+    renderCommands();
+    if (typeof srv !== 'undefined' && srv.on) renderServerPanel();
+    save();
+  }
+
+  function groups() {
+    const g = new Map();
+    state.rows.forEach(r => { const k = r.vbr || '(no vbr)'; if (!g.has(k)) g.set(k, { n: 0, tasks: 0 }); const o = g.get(k); o.n++; o.tasks += Number(r.tasks) || 0; });
+    return g;
+  }
+
+  function renderSummary(nBad, nWarn) {
+    const c = $('summaryChips'); c.innerHTML = '';
+    const g = groups();
+    const total = state.rows.length;
+    const chips = [];
+    chips.push(`<span class="chip"><b>${total}</b> prox${total === 1 ? 'y' : 'ies'} · <b>${[...g.values()].reduce((a, o) => a + o.tasks, 0)}</b> task slots</span>`);
+    for (const [k, o] of g) chips.push(`<span class="chip"><span class="mono">${esc(k)}</span> <b>${o.n}</b> · ${o.tasks} slots</span>`);
+    if (nBad) chips.push(`<span class="chip bad"><b>${nBad}</b> error${nBad > 1 ? 's' : ''}</span>`);
+    else if (total) chips.push(`<span class="chip ok">no errors</span>`);
+    if (nWarn) chips.push(`<span class="chip warn"><b>${nWarn}</b> warning${nWarn > 1 ? 's' : ''}</span>`);
+    c.innerHTML = chips.join('');
+    // stats
+    const s = state.sizing, st = $('fleetStats');
+    const perVm = s.disk + (s.data || 0), disk = total * perVm;
+    st.innerHTML = [
+      ['Proxies', total, `${g.size} VBR${g.size === 1 ? '' : 's'}`],
+      ['Task slots', [...g.values()].reduce((a, o) => a + o.tasks, 0), `${total ? ((([...g.values()].reduce((a, o) => a + o.tasks, 0)) / total)).toFixed(1) : '0'} per proxy`],
+      ['vCPU', total * s.cpu, `${s.cpu} per proxy`],
+      ['RAM', `${total * s.ram} GB`, `${s.ram} GB per proxy`],
+      ['Disk (thin)', disk >= 1000 ? `${(disk / 1000).toFixed(1)} TB` : `${disk} GB`, s.data ? `${s.disk} + ${s.data} GB per proxy (multi-disk)` : `${s.disk} GB per proxy, single disk`],
+    ].map(([k, v, sub]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub}</div></div>`).join('');
+  }
+
+  function renderVbrTable() {
+    const g = groups(), tb = $('vbrBody'); tb.innerHTML = '';
+    const s = state.sizing;
+    for (const [k, o] of g) {
+      if (!state.vbrs[k]) state.vbrs[k] = { server: '', user: '', secrets: `appliance-secrets-${k}.conf`, mfa: '' };
+      const v = state.vbrs[k];
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td class="mono">${esc(k)}</td><td class="num">${o.n}</td><td class="num">${o.tasks}</td><td class="num">${o.n * s.cpu}</td><td class="num">${o.n * s.ram}</td><td class="num">${o.n * (s.disk + (s.data || 0))}</td>` +
+        `<td><input type="text" class="mono" data-vk="${esc(k)}" data-vf="server" value="${esc(v.server)}" placeholder="${esc(k)}.example.local" aria-label="VBR server for ${esc(k)}"></td>` +
+        `<td><input type="text" class="mono" data-vk="${esc(k)}" data-vf="user" value="${esc(v.user || '')}" placeholder="svc-autodeploy" aria-label="VBR user for ${esc(k)}"></td>` +
+        `<td><input type="text" class="mono" data-vk="${esc(k)}" data-vf="secrets" value="${esc(v.secrets)}" aria-label="Settings file for ${esc(k)}"></td>` +
+        `<td><input type="text" class="mono" data-vk="${esc(k)}" data-vf="mfa" value="${esc(v.mfa)}" placeholder="(leave empty if the account has no MFA)" aria-label="VBR MFA seed file for ${esc(k)}"></td>`;
+      tb.appendChild(tr);
+    }
+    // export scope options
+    const sel = $('expScope'); const cur = sel.value;
+    sel.innerHTML = `<option value="*">All VBRs (${state.rows.length})</option>` + [...g.keys()].map(k => `<option value="${esc(k)}">${esc(k)} (${g.get(k).n})</option>`).join('');
+    if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  }
+
+  // ---------- CSV ----------
+  const q = (s) => /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  function buildCsv(scope) {
+    const rows = state.rows.filter(r => scope === '*' || (r.vbr || '(no vbr)') === scope);
+    const cols = [...SCHEMA, ...OPTIONAL.filter(k => rows.some(r => r[k]))];
+    return [cols.join(','), ...rows.map(r => cols.map(k => q(r[k] ?? '')).join(','))].join('\n') + '\n';
+  }
+  function renderCsv() {
+    const scope = $('expScope').value || '*';
+    const csv = buildCsv(scope);
+    const lines = csv.trimEnd().split('\n');
+    $('csvPreview').textContent = lines.slice(0, 12).join('\n') + (lines.length > 12 ? `\n… ${lines.length - 12} more row${lines.length - 12 > 1 ? 's' : ''}` : '');
+    const bad = lastVal.reduce((a, v) => a + v.bad.length, 0);
+    $('csvNote').textContent = bad ? `${bad} error${bad > 1 ? 's' : ''} in the fleet. The script rejects empty required fields, bad IPs and duplicate hostnames at load, so fix red rows before exporting.` : `Schema: ${SCHEMA.join(', ')}${OPTIONAL.filter(k => state.rows.some(r => r[k])).map(k => ', ' + k).join('')}. UTF-8, LF line endings, no BOM.`;
+    $('btnDownload').disabled = !state.rows.length; $('btnCopyCsv').disabled = !state.rows.length;
+  }
+  function parseCsv(text) {
+    const out = []; let row = [], field = '', inQ = false;
+    text = text.replace(/^﻿/, '');
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inQ) { if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; } else field += c; }
+      else if (c === '"') inQ = true;
+      else if (c === ',') { row.push(field); field = ''; }
+      else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(field); field = ''; if (row.some(f => f.trim() !== '')) out.push(row); row = []; }
+      else field += c;
+    }
+    row.push(field); if (row.some(f => f.trim() !== '')) out.push(row);
+    return out;
+  }
+  function importCsvText(text) {
+    const recs = parseCsv(text);
+    if (recs.length < 2) { toast('No data rows found (header + at least one row needed).'); return; }
+    const hdr = recs[0].map(h => h.trim().toLowerCase());
+    const missing = SCHEMA.filter(k => !hdr.includes(k));
+    if (missing.length) { toast(`Header is missing: ${missing.join(', ')}`); return; }
+    const idx = Object.fromEntries([...SCHEMA, ...OPTIONAL].map(k => [k, hdr.indexOf(k)]));
+    let n = 0;
+    for (const rec of recs.slice(1)) {
+      const r = {}; for (const k of [...SCHEMA, ...OPTIONAL]) r[k] = idx[k] >= 0 ? (rec[idx[k]] ?? '').trim() : '';
+      state.rows.push(normRow(r)); n++;
+    }
+    if (state.rows.some(r => OPTIONAL.some(k => r[k]))) { state.showHs = true; $('showHs').checked = true; }
+    state.example = false; $('exampleBanner').hidden = true;
+    renderTable(); toast(`Imported ${n} row${n > 1 ? 's' : ''}.`);
+  }
+
+  // ---------- commands ----------
+  function renderCommands() {
+    const out = $('cmdOut'); out.innerHTML = '';
+    const g = groups();
+    const csv = $('c_csv').value.trim() || 'proxies.csv', iso = $('c_iso').value.trim() || '<base.iso>', vc = $('c_vc').value.trim() || '<vcenter>', vcUser = $('c_vcuser').value.trim(), dns = $('c_dns').value.trim();
+    const bash = $('c_shell').value === 'bash';
+    const pfx = bash ? './' : '.\\', cont = bash ? ' \\\n  ' : ' `\n  ', invoke = bash ? 'pwsh -File ./Deploy-VeeamProxies.ps1' : 'pwsh -File .\\Deploy-VeeamProxies.ps1';
+    const tm = $('c_tm').value, role = $('c_role').value, isoOnly = $('c_isoonly').checked;
+    // VM hardware + disk layout: only when not the script defaults (6 / 12 / 120, single disk).
+    const s = state.sizing;
+    const hw = (s.cpu !== 6 ? ` -VmCpu ${s.cpu}` : '') + (s.ram !== 12 ? ` -VmMemoryGB ${s.ram}` : '') + (s.disk !== 120 ? ` -VmDiskGB ${s.disk}` : '') +
+      (s.data ? ` -MultiDisk -VmDataDiskGB ${s.data}` : '') +
+      (s.data && $('c_logs').checked ? ' -LogsOnDataDisk' : '');
+    $('c_single').disabled = !isoOnly;
+    if ($('c_logs').checked && !s.data) out.insertAdjacentHTML('beforeend', `<p class="small"><span class="chip bad">Logs on disk 2 needs an extra data disk: set "Extra data disk GB" (120 GB or more, Veeam's minimum for the data disk).</span></p>`);
+    for (const k of g.keys()) {
+      if (k === '(no vbr)') continue;
+      const v = state.vbrs[k] || {};
+      const vbr = v.server || `<${k}-server>`, sec = v.secrets || `appliance-secrets-${k}.conf`;
+      const base = `${invoke} -CsvPath ${pfx}${csv} -Vbr ${k}`;
+      const a = `${base}${cont}-ApplianceSecretsFile ${pfx}${sec}${cont}-BaseIso ${pfx}${iso} -ValidateOnly${hw}`;
+      const common = `${base}${cont}-vCenterServer ${vc}${vcUser ? ' -vCenterUser ' + vcUser : ''} -BaseIso ${pfx}${iso}${cont}-ApplianceSecretsFile ${pfx}${sec}${cont}-VBRServer ${vbr}${v.user ? ' -VBRUser ' + v.user : ''}` +
+        ($('c_tls').checked ? ' -SkipTlsVerify' : '') + (v.mfa ? `${cont}-VBRMfaSecretFile ${pfx}${v.mfa}` : '') +
+        (tm !== 'Auto' ? ` -TransportMode ${tm}` : '') + (role !== 'InfrastructureServerIscsi' ? ` -ApplianceRole ${role}` : '') + hw;
+      const dnsCmd = dns ? `pwsh -File .\\New-ProxyDnsRecords.ps1 -CsvPath .\\${csv} -Vbr ${k} -DnsServer ${dns} -Credential (Get-Credential) -WhatIf   # then without -WhatIf` : null;
+      const b = `${common} -WhatIf`;
+      const c = `${common}${$('c_rb').checked ? ' -RollbackOnFailure' : ''}${$('c_replace').checked ? ' -Replace' + ($('c_replacePolicy').value === 'Disable' ? ' -ReplaceJobPolicy Disable' : '') : ''}`;
+      // No vCenter access: build the ISO(s) + VM build sheet here, register once the VMs are up.
+      const isoCmd = `${base}${cont}-IsoOnly${$('c_single').checked ? ' -SingleIso' : ''} -BaseIso ${pfx}${iso}${cont}-ApplianceSecretsFile ${pfx}${sec}` +
+        (role !== 'InfrastructureServerIscsi' ? ` -ApplianceRole ${role}` : '') + hw;
+      const regCmd = `${base}${cont}-VBRServer ${vbr}${v.user ? ' -VBRUser ' + v.user : ''}` + ($('c_tls').checked ? ' -SkipTlsVerify' : '') +
+        (v.mfa ? `${cont}-VBRMfaSecretFile ${pfx}${v.mfa}` : '') + (tm !== 'Auto' ? ` -TransportMode ${tm}` : '') + ' -SkipDeploy';
+      const steps = isoOnly
+        ? [['1 · Validate (offline)', a], [`2 · Build ${$('c_single').checked ? 'one ISO for all nodes' : 'one ISO per node'} + VM build sheet (no vCenter, output in iso-out/)`, isoCmd], ['3 · Register, once the VMs answer on :10443 (VBR access only)', regCmd]]
+        : [['1 · Validate (offline)', a], ['2 · What-if (connects, changes nothing)', b], ['3 · Deploy + register', c]];
+      const block = document.createElement('div'); block.className = 'cmdblock';
+      block.innerHTML = `<div class="cmdhead"><span class="t"><span class="mono">${esc(k)}</span> · ${g.get(k).n} prox${g.get(k).n === 1 ? 'y' : 'ies'} → <span class="mono">${esc(vbr)}</span></span><span class="grow"></span></div>` +
+        [...(dnsCmd ? [['0 · DNS A + PTR records (Windows host with RSAT DNS tools, before registering by name)', dnsCmd]] : []), ...steps].map(([t, cmd]) =>
+          `<div class="cmdhead"><span class="small muted">${t}</span><span class="grow"></span><button type="button" class="btn quiet small" data-copy>Copy</button></div><pre>${esc(cmd)}</pre>`).join('');
+      out.appendChild(block);
+    }
+    if (!out.children.length) out.innerHTML = '<p class="muted small">Add nodes with a VBR key to get commands.</p>';
+  }
+
+  // ---------- generator ----------
+  // Host names are the customer's own standard (customer requirement): a free-text {namespace} prefix is
+  // the default token, so neither the VBR key nor the cluster is forced into the name; {cluster} and
+  // {vbr} stay available as optional tokens. Every token is made host-name safe.
+  const DEFAULT_PATTERN = '{namespace}-{nn}';
+  const hostToken = s => String(s || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+  function expandPattern(pattern, n, v) {
+    return pattern.replace(/\{namespace\}/g, hostToken(v.namespace)).replace(/\{cluster\}/g, hostToken(v.cluster)).replace(/\{vbr\}/g, hostToken(v.vbr))
+      .replace(/\{nnn\}/g, String(n).padStart(3, '0')).replace(/\{nn\}/g, String(n).padStart(2, '0')).replace(/\{n\}/g, String(n));
+  }
+  // Next free index for this pattern among the rows already in the table, so a second batch for the
+  // same cluster continues at 03 instead of restarting at 01. Null when no row matches the pattern.
+  function nextIndexFor(pattern, v) {
+    const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const src = esc(pattern).replace(/\\\{namespace\\\}/g, esc(hostToken(v.namespace))).replace(/\\\{cluster\\\}/g, esc(hostToken(v.cluster))).replace(/\\\{vbr\\\}/g, esc(hostToken(v.vbr))).replace(/\\\{nnn?\\\}|\\\{n\\\}/g, '(\\d+)');
+    const re = new RegExp('^' + src + '$', 'i');
+    const m = state.rows.map(r => (r.hostname || '').match(re)).filter(Boolean).map(x => parseInt(x[1], 10)).filter(Number.isFinite);
+    return m.length ? Math.max(...m) + 1 : null;
+  }
+  function genRows() {
+    const vbr = $('g_vbr').value.trim(), count = Math.max(1, Math.min(200, parseInt($('g_count').value, 10) || 1));
+    const pattern = $('g_pattern').value.trim() || DEFAULT_PATTERN, start = parseInt($('g_start').value, 10) || 0;
+    const ip0 = $('g_ip').value.trim();
+    const base = isIPv4(ip0) ? ip2int(ip0) : null;
+    const ip20 = $('g_ip2').value.trim();
+    const base2 = isIPv4(ip20) ? ip2int(ip20) : null;
+    const rows = [];
+    for (let i = 0; i < count; i++) {
+      const n = start + i;
+      rows.push(normRow({
+        vbr, hostname: expandPattern(pattern, n, { namespace: $('g_namespace').value, vbr, cluster: $('g_cluster').value }),
+        ip: base === null ? ip0 : int2ip((base + i) >>> 0), netmask: $('g_mask').value, gateway: $('g_gw').value, dns: $('g_dns').value,
+        cluster: $('g_cluster').value, datastore: $('g_ds').value, folder: $('g_folder').value, portgroup: $('g_pg').value, role: $('g_role').value,
+        tasks: roleParts($('g_role').value).includes('viproxy') ? $('g_tasks').value : '',
+        [GR]: roleParts($('g_role').value).includes('gateway') ? $('g_gwrepo').value.trim() : '',
+        [IP2]: ip20 ? (base2 === null ? ip20 : int2ip((base2 + i) >>> 0)) : '', [NM2]: ip20 ? $('g_mask2').value.trim() : '', [PG2]: ip20 ? $('g_pg2').value.trim() : '',
+      }));
+    }
+    return rows;
+  }
+  function genPreview() {
+    const r = genRows(); const f = r[0], l = r[r.length - 1];
+    $('genPreview').textContent = r.length === 1 ? `Will add ${f.hostname} (${f.ip})` : `Will add ${r.length} nodes: ${f.hostname} (${f.ip}) … ${l.hostname} (${l.ip})`;
+  }
+
+  // ---------- misc ----------
+  let toastT;
+  function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2200); }
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); toast('Copied.'); }
+    catch (e) { const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); toast('Copied.'); } catch (e2) { toast('Copy failed - select the text manually.'); } ta.remove(); }
+  }
+  function setTheme(choice) {
+    const root = document.documentElement;
+    if (choice === 'system') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', choice);
+    document.querySelectorAll('[data-theme-choice]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.themeChoice === choice)));
+    try { localStorage.setItem(LS_KEY + ':theme', choice); } catch (e) {}
+  }
+
+  // ---------- events ----------
+  $('genForm').addEventListener('submit', (e) => { e.preventDefault(); const r = genRows(); state.rows.push(...r); if (r.some(x => OPTIONAL.some(k => x[k]))) { state.showHs = true; $('showHs').checked = true; } state.example = false; $('exampleBanner').hidden = true; renderTable(); toast(`Added ${r.length} node${r.length > 1 ? 's' : ''}.`); });
+  $('genForm').addEventListener('input', genPreview);
+  const syncGwRepo = () => { $('g_gwrepo_f').hidden = !roleParts($('g_role').value).includes('gateway'); };
+  $('g_role').addEventListener('change', syncGwRepo); syncGwRepo();
+  $('btnFillFromRow').addEventListener('click', () => {
+    const k = $('g_vbr').value.trim(); const r = state.rows.find(x => x.vbr === k) || state.rows[state.rows.length - 1];
+    if (!r) { toast('No rows to copy from.'); return; }
+    $('g_mask').value = r.netmask; $('g_gw').value = r.gateway; $('g_dns').value = r.dns; $('g_cluster').value = r.cluster; $('g_ds').value = r.datastore; $('g_folder').value = r.folder; $('g_pg').value = r.portgroup; $('g_tasks').value = r.tasks || 12; $('g_mask2').value = r[NM2] || ''; $('g_pg2').value = r[PG2] || '';
+    const last = state.rows.filter(x => x.vbr === r.vbr && isIPv4(x.ip)).map(x => ip2int(x.ip)).sort((a, b) => a - b).pop();
+    if (last !== undefined) $('g_ip').value = int2ip((last + 1) >>> 0);
+    const next = nextIndexFor($('g_pattern').value.trim() || DEFAULT_PATTERN, { namespace: $('g_namespace').value, vbr: k, cluster: r.cluster });
+    if (next !== null) $('g_start').value = next;
+    else { const m = state.rows.filter(x => x.vbr === r.vbr).map(x => (x.hostname.match(/(\d+)(?=\D*$)/) || [])[1]).filter(Boolean).map(Number); if (m.length) $('g_start').value = Math.max(...m) + 1; }
+    genPreview(); toast(`Settings copied from ${r.vbr}.`);
+  });
+  // Changing the cluster, the pattern or the VBR key re-derives the start index from the rows that
+  // already follow that pattern (only when some do; a fresh series keeps the typed value).
+  ['g_namespace', 'g_cluster', 'g_pattern', 'g_vbr'].forEach(id => $(id).addEventListener('change', () => {
+    const next = nextIndexFor($('g_pattern').value.trim() || DEFAULT_PATTERN, { namespace: $('g_namespace').value, vbr: $('g_vbr').value.trim(), cluster: $('g_cluster').value });
+    if (next !== null) { $('g_start').value = next; genPreview(); }
+  }));
+  ['s_cpu', 's_ram', 's_disk', 's_data'].forEach(id => $(id).addEventListener('input', () => { state.sizing = { cpu: +$('s_cpu').value || 6, ram: +$('s_ram').value || 12, disk: +$('s_disk').value || 120, data: Math.max(0, +$('s_data').value || 0) }; refresh(); }));
+  $('fleetBody').addEventListener('input', (e) => {
+    const t = e.target; if (!t.dataset || t.dataset.k === undefined) return;
+    state.rows[+t.dataset.i][t.dataset.k] = t.value.trim();
+    if (t.dataset.k === 'vbr') { renderVbrTable(); }
+    refresh();
+  });
+  $('fleetBody').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-op]'); if (!b) return;
+    const i = +b.dataset.i;
+    if (b.dataset.op === 'del') { state.rows.splice(i, 1); renderTable(); }
+    else if (b.dataset.op === 'dup') { const c = Object.assign({}, state.rows[i]); c.hostname = ''; c.ip = isIPv4(c.ip) ? int2ip((ip2int(c.ip) + 1) >>> 0) : ''; state.rows.splice(i + 1, 0, c); renderTable(); }
+  });
+  $('vbrBody').addEventListener('input', (e) => { const t = e.target; if (!t.dataset.vk) return; state.vbrs[t.dataset.vk][t.dataset.vf] = t.value.trim(); renderCommands(); save(); });
+  $('btnSort').addEventListener('click', () => { state.rows.sort((a, b) => (a.vbr || '').localeCompare(b.vbr || '', undefined, { numeric: true }) || (a.hostname || '').localeCompare(b.hostname || '', undefined, { numeric: true })); renderTable(); });
+  $('showHs').addEventListener('change', (e) => { state.showHs = e.target.checked; renderTable(); });
+  $('btnClear').addEventListener('click', () => { if (!state.rows.length || confirm(`Remove all ${state.rows.length} rows from this planner?`)) { state.rows = []; state.example = false; $('exampleBanner').hidden = true; renderTable(); } });
+  $('fileImport').addEventListener('change', (e) => { const f = e.target.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => importCsvText(String(rd.result)); rd.readAsText(f); e.target.value = ''; });
+  $('btnPaste').addEventListener('click', () => { $('pasteBox').hidden = false; $('pasteArea').focus(); });
+  $('btnPasteCancel').addEventListener('click', () => { $('pasteBox').hidden = true; });
+  $('btnPasteImport').addEventListener('click', () => { importCsvText($('pasteArea').value); $('pasteArea').value = ''; $('pasteBox').hidden = true; });
+  $('expScope').addEventListener('change', renderCsv);
+  $('btnCopyCsv').addEventListener('click', () => copyText(buildCsv($('expScope').value || '*')));
+  $('btnDownload').addEventListener('click', () => {
+    const scope = $('expScope').value || '*';
+    const blob = new Blob([buildCsv(scope)], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = scope === '*' ? 'proxies.csv' : `proxies-${scope}.csv`;
+    document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+    toast(`Downloading ${a.download}. If nothing happens (sandboxed viewer), use Copy CSV.`);
+  });
+  ['c_csv', 'c_iso', 'c_vc', 'c_vcuser', 'c_dns', 'c_tls', 'c_rb', 'c_isoonly', 'c_single', 'c_logs', 'c_replace', 'c_replacePolicy', 'c_tm', 'c_role', 'c_shell'].forEach(id => $(id).addEventListener('input', () => { renderCommands(); save(); }));
+  ['cmdOut', 'reportWrap'].forEach(id => $(id).addEventListener('click', (e) => { const b = e.target.closest('button[data-copy]'); if (!b) return; const pre = b.parentElement.nextElementSibling; if (pre) copyText(pre.textContent); }));
+  document.querySelectorAll('[data-theme-choice]').forEach(b => b.addEventListener('click', () => setTheme(b.dataset.themeChoice)));
+
+
+  // ---------- deployment server (optional; appears only when served by Start-DeploymentServer.ps1) ----------
+  const srv = { on: false, status: null, watching: null, timer: null };
+  async function api(path, opts) {
+    const r = await fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}));
+    const ct = r.headers.get('content-type') || '';
+    const body = ct.includes('json') ? await r.json() : await r.text();
+    if (!r.ok) throw new Error((body && body.error) || (typeof body === 'string' ? body : r.statusText));
+    return body;
+  }
+  function fillSel(sel, items, blankLabel) {
+    const cur = sel.value;
+    sel.innerHTML = (blankLabel ? `<option value="">${esc(blankLabel)}</option>` : '') + items.map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
+    if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  }
+  async function detectServer() {
+    if (!/^https?:$/.test(location.protocol)) return;
+    try { srv.status = await api('/api/status'); } catch (e) { return; }
+    srv.on = true; $('serverPanel').hidden = false; renderServerPanel(); refreshRuns();
+  }
+  // Non-secret summary of the selected settings file (written by the server at upload time), so the
+  // operator sees "MFA on · SO off · NTP dk.pool.ntp.org" before pressing Run - not example.local.
+  function showSettingsInfo(msg, bad) {
+    const el = $('r_settingsInfo'); el.className = 'small ' + (bad ? 'bad' : 'muted');
+    if (msg) { el.textContent = msg; return; }
+    const name = $('r_settings').value, info = srv.status && srv.status.settingsInfo && srv.status.settingsInfo[name];
+    if (!name) { el.textContent = ''; return; }
+    if (!info) { el.textContent = 'No summary for this file (uploaded before summaries existed). Re-upload the .conf to get one.'; return; }
+    const ntp = (info.ntp || []).join(', ') || '(none)';
+    el.textContent = `veeamadmin MFA ${info.mfa ? 'on' : 'off'} · Security Officer ${info.securityOfficer ? 'on' : 'off'} · NTP ${ntp}${info.ntpRunSync ? ' (sync at first boot)' : ''} · password ${info.passwordLength} chars`;
+  }
+  function renderServerPanel() {
+    const s = srv.status; if (!s) return;
+    $('srvInfo').textContent = `${s.host} · pwsh ${s.pwsh} · xorriso ${s.xorriso ? 'found' : 'MISSING'} · PowerCLI ${s.powercli ? 'found' : 'MISSING'}`;
+    fillSel($('r_iso'), s.isoFiles); fillSel($('r_settings'), s.settingsFiles); fillSel($('r_mfa'), s.mfaFiles, '(none)');
+    showSettingsInfo();
+    fillSel($('r_vbr'), [...groups().keys()].filter(k => k !== '(no vbr)'));
+    if (!$('r_vc').value) $('r_vc').value = $('c_vc').value;
+    if (!$('r_vcuser').value) $('r_vcuser').value = $('c_vcuser').value;
+    syncVbrFields();
+  }
+  function syncVbrFields() {
+    const v = state.vbrs[$('r_vbr').value] || {};
+    if (v.server) $('r_vbrsrv').value = v.server; if (v.user) $('r_vbruser').value = v.user;
+    if (v.mfa && [...$('r_mfa').options].some(o => o.value === v.mfa)) $('r_mfa').value = v.mfa;
+  }
+  async function startRun() {
+    const vbr = $('r_vbr').value, mode = $('r_mode').value;
+    if (!vbr) { toast('Pick a VBR key first.'); return; }
+    const bad = state.rows.reduce((n, r, i) => n + ((r.vbr === vbr && lastVal[i] && lastVal[i].bad.length) ? 1 : 0), 0);
+    if (bad) { toast(`${bad} row(s) for ${vbr} have errors. Fix them first.`); return; }
+    const n = state.rows.filter(r => r.vbr === vbr).length;
+    const warn = {
+      Rollback: `ROLLBACK: remove ${n} proxy VM(s) of ${vbr} from the VBR and DELETE them from vCenter. Continue?`,
+      Full: `Deploy AND register ${n} proxy VM(s) for ${vbr}. Continue?`,
+      DeployOnly: `Deploy ${n} proxy VM(s) for ${vbr} without registration. Continue?`,
+      RegisterOnly: `Register ${n} proxy VM(s) of ${vbr} on the VBR. Continue?`,
+    }[mode];
+    if (warn && !confirm(warn)) return;
+    if ($('c_replace').checked && ['Full', 'RegisterOnly', 'WhatIf'].includes(mode) && !confirm('Replace mode: proxies in this CSV that already exist in the VBR are removed from it (their job pinning is captured first and restored after), their VMs are powered off and renamed, and fresh appliances take their names and IPs. Continue?')) return;
+    const body = {
+      csv: buildCsv(vbr), vbr, mode, iso: $('r_iso').value, settingsFile: $('r_settings').value,
+      vcenter: { server: $('r_vc').value.trim(), user: $('r_vcuser').value.trim(), password: $('r_vcpass').value },
+      vbrServer: { server: $('r_vbrsrv').value.trim(), user: $('r_vbruser').value.trim(), password: $('r_vbrpass').value, mfaFile: $('r_mfa').value },
+      transportMode: $('c_tm').value, applianceRole: $('c_role').value, rollbackOnFailure: $('c_rb').checked, skipTls: $('c_tls').checked,
+      replace: $('c_replace').checked, replaceJobPolicy: $('c_replacePolicy').value,
+      vmCpu: state.sizing.cpu, vmMemoryGB: state.sizing.ram, vmDiskGB: state.sizing.disk, dataDiskGB: state.sizing.data || 0,
+      logsOnDataDisk: !!(state.sizing.data && $('c_logs').checked),
+    };
+    if ($('c_logs').checked && !state.sizing.data) { toast('Logs on disk 2 needs an extra data disk (sizing panel).'); return; }
+    $('r_run').disabled = true;
+    try {
+      const r = await api('/api/run', { method: 'POST', body: JSON.stringify(body) });
+      toast(`Run ${r.id} started.`); $('r_vcpass').value = ''; $('r_vbrpass').value = '';
+      await refreshRuns(); watchRun(r.id);
+    } catch (e) { toast('Run rejected: ' + e.message); }
+    finally { $('r_run').disabled = false; }
+  }
+  async function refreshRuns() {
+    let runs = []; try { runs = await api('/api/runs'); } catch (e) { return; }
+    const tb = $('runsBody'); tb.innerHTML = runs.length ? '' : '<tr><td colspan="6" class="muted">No runs yet.</td></tr>';
+    for (const r of runs) {
+      const tr = document.createElement('tr');
+      const cls = r.state === 'running' ? '' : r.state === 'finished' ? 'ok' : 'bad';
+      const exit = (r.state !== 'running' && r.exit !== null && r.exit !== undefined) ? ` (exit ${r.exit})` : '';
+      tr.innerHTML = `<td class="mono">${esc((r.started || '').replace('T', ' ').slice(0, 19))}</td><td class="mono">${esc(r.id)}</td><td class="mono">${esc(r.vbr)}</td><td>${esc(r.mode)}</td><td><span class="chip ${cls}">${esc(r.state)}${esc(exit)}</span></td><td><button type="button" class="btn quiet small" data-log="${esc(r.id)}">Log</button></td>`;
+      tb.appendChild(tr);
+    }
+  }
+  async function watchRun(id) {
+    srv.watching = id; $('logWrap').hidden = false; $('logTitle').textContent = `Run ${id}`; clearTimeout(srv.timer);
+    const tick = async () => {
+      if (srv.watching !== id) return;
+      try {
+        const [info, log] = await Promise.all([api(`/api/runs/${id}`), api(`/api/runs/${id}/log`)]);
+        const pre = $('logView'); const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+        pre.textContent = log || '(no output yet)'; if (atEnd) pre.scrollTop = pre.scrollHeight;
+        $('logCancel').hidden = info.state !== 'running';
+        $('reportWrap').innerHTML = ((info.report && info.report.length)
+          ? '<h3 style="margin-top:10px">Run report</h3><div class="tablewrap" style="border-top:0"><table class="vbrs"><thead><tr>' + Object.keys(info.report[0]).map(k => `<th>${esc(k)}</th>`).join('') + '</tr></thead><tbody>' + info.report.map(row => '<tr>' + Object.values(row).map(v => `<td class="mono">${esc(v)}</td>`).join('') + '</tr>').join('') + '</tbody></table></div>'
+          : '') + filesHtml(id, info);
+        if (info.state === 'running') srv.timer = setTimeout(tick, 2000); else refreshRuns();
+      } catch (e) { $('logView').textContent = 'Could not read the run: ' + e.message; }
+    };
+    tick();
+  }
+  // ISO-only runs: output files. Small ones download through the page; ISOs go over SSH (this server
+  // handles one request at a time), so show a ready scp command. The ISOs hold the appliance passwords.
+  function filesHtml(id, info) {
+    const files = info.files || []; if (!files.length || info.state === 'running') return '';
+    const st = srv.status || {}, who = `${st.user || 'deploy'}@<deployment-server>`;
+    const mb = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(2) + ' GB' : Math.max(1, Math.round(b / 1048576)) + ' MB';
+    const rows = files.map(f => `<tr><td class="mono">${esc(f.name)}</td><td class="num">${mb(f.bytes)}</td><td>${f.download
+      ? `<a class="btn quiet small" href="/api/runs/${encodeURIComponent(id)}/files/${encodeURIComponent(f.name)}" download>Download</a>`
+      : `<span class="small muted">copy with scp (below)</span>`}</td></tr>`).join('');
+    const scp = files.filter(f => !f.download).map(f => `scp ${who}:${f.path} .`).join('\n');
+    return `<h3 style="margin-top:10px">ISO output</h3><div class="tablewrap" style="border-top:0"><table class="vbrs"><thead><tr><th>File</th><th>Size</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` +
+      (scp ? `<div class="cmdhead"><span class="small muted">Copy the ISO(s) to your machine (same SSH access as the tunnel), then hand them with the VM build sheet to the vSphere team</span><span class="grow"></span><button type="button" class="btn quiet small" data-copy>Copy</button></div><pre>${esc(scp)}</pre>` : '') +
+      `<p class="small"><span class="chip warn">The ISOs contain the appliance passwords and MFA seeds in clear text.</span> <button type="button" class="btn quiet small danger" data-delfiles="${esc(id)}">Delete ISO output on the server</button></p>`;
+  }
+  document.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-delfiles]'); if (!b) return;
+    if (!confirm('Delete the ISO output of this run on the server? Copy the ISOs first.')) return;
+    try { await api(`/api/runs/${b.dataset.delfiles}/files/delete`, { method: 'POST', body: '{}' }); toast('ISO output deleted.'); watchRun(b.dataset.delfiles); } catch (err) { toast(err.message); }
+  });
+  $('r_vbr').addEventListener('change', syncVbrFields);
+  $('r_run').addEventListener('click', startRun);
+  $('r_inv').addEventListener('click', async () => {
+    const server = $('r_vc').value.trim(), user = $('r_vcuser').value.trim(), password = $('r_vcpass').value;
+    if (!server || !user || !password) { toast('Enter vCenter address, user and password first.'); return; }
+    $('r_inv').disabled = true; $('r_testResult').textContent = 'loading inventory…';
+    try {
+      inv = await api('/api/vsphere/inventory', { method: 'POST', body: JSON.stringify({ server, user, password }) });
+      const fill = (id, names) => { $(id).innerHTML = names.map(n => `<option value="${esc(n)}"></option>`).join(''); };
+      fill('dl_cluster', inv.clusters.map(c => c.name));
+      fill('dl_datastore', [...inv.datastoreClusters.map(d => d.name), ...inv.datastores.map(d => d.name)]);
+      fill('dl_folder', inv.folders.map(f => f.name));
+      fill('dl_portgroup', inv.portgroups.map(p => p.name));
+      $('r_testResult').style.color = 'var(--accent)';
+      $('r_testResult').textContent = `${inv.vcenter}: ${inv.clusters.length} cluster(s), ${inv.datastores.length} datastore(s), ${inv.datastoreClusters.length} SDRS cluster(s), ${inv.folders.length} VM folder(s), ${inv.portgroups.length} port group(s). Placement fields now suggest these names and unknown ones are flagged.`;
+      refresh();
+    } catch (e) { $('r_testResult').style.color = 'var(--bad)'; $('r_testResult').textContent = 'Inventory failed: ' + e.message; }
+    finally { $('r_inv').disabled = false; }
+  });
+  $('r_test').addEventListener('click', async () => {
+    const out = $('r_testResult'); out.textContent = 'testing…';
+    const checks = [['vCenter', $('r_vc').value.trim(), 443], ['VBR REST', $('r_vbrsrv').value.trim(), 9419]].filter(c => c[1]);
+    const res = [];
+    for (const [label, host, port] of checks) {
+      try { const r = await api('/api/probe', { method: 'POST', body: JSON.stringify({ host, port }) }); res.push(`${label} ${host}:${port} ${r.open ? 'OK' : 'UNREACHABLE (' + r.detail + ')'}`); }
+      catch (e) { res.push(`${label} ${host}: ${e.message}`); }
+    }
+    // DNS: the VBR adds each appliance under its registration name (vbrname, else hostname). A name
+    // without a record fails only after the 25-minute deploy, so resolve them from the server now.
+    const vbrKey = $('r_vbr').value;
+    const seen = new Set();
+    const rows = state.rows.filter(r => !vbrKey || r.vbr === vbrKey).map(r => ({ name: ((r[VN] || r.hostname) || '').trim(), ip: (r.ip || '').trim() }))
+      .filter(x => x.name && !isIPv4(x.name) && !seen.has(x.name) && seen.add(x.name));
+    if (rows.length) {
+      try {
+        const d = await api('/api/dns', { method: 'POST', body: JSON.stringify({ rows }) });
+        const bad = d.results.filter(x => !x.resolves).map(x => x.name);
+        const wrong = d.results.filter(x => x.resolves && x.matchesRow === false).map(x => `${x.name} → ${x.address}`);
+        if (wrong.length) res.push(`DNS: ${wrong.length} name(s) point at a DIFFERENT address than the CSV (${wrong.slice(0, 4).join('; ')}${wrong.length > 4 ? '; …' : ''}) - a stale record from an earlier proxy? Fix it (New-ProxyDnsRecords.ps1 -UpdateExisting) or set vbrname to the IP; the script refuses to register a machine whose name and IP show different certificates.`);
+        if (bad.length) res.push(`DNS: ${bad.length} of ${rows.length} proxy name(s) do not resolve from the server (${bad.slice(0, 5).join(', ')}${bad.length > 5 ? ', …' : ''}). Create the A records (New-ProxyDnsRecords.ps1) or set vbrname to the IP; otherwise the script registers by IP and warns.`);
+        if (!wrong.length && !bad.length) res.push(`DNS: all ${rows.length} proxy name(s) resolve to their CSV addresses`);
+      } catch (e) { res.push('DNS check: ' + e.message); }
+    }
+    if (!checks.length) res.push('enter the vCenter and VBR addresses first');
+    out.textContent = res.join(' · ');
+    out.style.color = res.some(x => /UNREACHABLE|failed|do not resolve|DIFFERENT address/.test(x)) ? 'var(--bad)' : 'var(--accent)';
+  });
+  $('runsBody').addEventListener('click', (e) => { const b = e.target.closest('button[data-log]'); if (b) watchRun(b.dataset.log); });
+  $('logClose').addEventListener('click', () => { srv.watching = null; clearTimeout(srv.timer); $('logWrap').hidden = true; });
+  $('logCancel').addEventListener('click', async () => {
+    if (!srv.watching || !confirm('Cancel this run? The current step is killed; partially created objects may remain.')) return;
+    try { await api(`/api/runs/${srv.watching}/cancel`, { method: 'POST', body: '{}' }); toast('Cancel requested.'); } catch (e) { toast(e.message); }
+  });
+  $('r_settingsUpload').addEventListener('change', async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const text = await f.text();
+    try {
+      const r = await api('/api/settings', { method: 'POST', body: JSON.stringify({ name: f.name.replace(/\.(conf|txt)$/i, ''), content: text }) });
+      toast(`Stored encrypted as ${r.name}.`); srv.status = await api('/api/status'); renderServerPanel(); $('r_settings').value = r.name; showSettingsInfo();
+    } catch (err) { toast('Upload rejected.'); showSettingsInfo(err.message, true); }
+    e.target.value = '';
+  });
+  $('r_settings').addEventListener('change', () => showSettingsInfo());
+
+  // ---------- boot ----------
+  try { const th = localStorage.getItem(LS_KEY + ':theme'); if (th) setTheme(th); } catch (e) {}
+  if (!load()) { state.rows = SAMPLE.map(normRow); state.example = true; }
+  $('exampleBanner').hidden = !state.example;
+  $('s_cpu').value = state.sizing.cpu; $('s_ram').value = state.sizing.ram; $('s_disk').value = state.sizing.disk; $('s_data').value = state.sizing.data || 0; $('showHs').checked = state.showHs;
+  renderTable(); genPreview(); detectServer();
+})();
+</script>
+</body>
+</html>

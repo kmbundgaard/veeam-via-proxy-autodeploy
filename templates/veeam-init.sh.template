@@ -1,0 +1,17 @@
+#!/bin/bash
+# veeam-init.sh - one-shot first-boot Initial Configuration (Veeam Help Center, "Automating
+# Installation with Initial Configuration"). Written by the kickstart %post to
+# /etc/veeam/veeam-init.sh and run once by veeam-init.service. Applies /etc/veeam/vbr_init.cfg
+# through the Veeam host manager, then disables its own unit.
+# Additions over the documented minimum: a log file, and optional removal of the plaintext answer
+# file after a successful apply (CLEANUP_ANSWER_FILE in the secrets file, default true).
+set -eE -u -o pipefail
+exec > >(tee -a /var/log/veeam-init.log) 2>&1
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) veeam-init: applying /etc/veeam/vbr_init.cfg"
+/opt/veeam/hostmanager/veeamhostmanager --apply_init_config /etc/veeam/vbr_init.cfg
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) veeam-init: apply_init_config finished"
+systemctl disable veeam-init
+if [ "{{CLEANUP_ANSWER_FILE}}" = "true" ]; then
+    (shred -u /etc/veeam/vbr_init.cfg 2>/dev/null || rm -f /etc/veeam/vbr_init.cfg) && echo "veeam-init: answer file removed"
+fi
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) veeam-init: done"

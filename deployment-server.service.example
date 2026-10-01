@@ -1,0 +1,27 @@
+# /etc/systemd/system/deployment-server.service  (Rocky Linux deployment server)
+# Serves Fleet-Planner.html + the run API on 127.0.0.1:8080. Reach it through an SSH tunnel:
+#   ssh -L 8080:127.0.0.1:8080 deploy@<server>   then open http://127.0.0.1:8080
+# Prereqs on the box: pwsh 7 (Microsoft repo RPM), xorriso (dnf), PowerCLI staged for the 'deploy'
+# user (Save-Module VCF.PowerCLI -> ~/.local/share/powershell/Modules), the project in /opt/autodeploy,
+# ISOs in /opt/autodeploy/server-data/iso.
+[Unit]
+Description=Veeam proxy deployment server (Fleet Planner + run API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/autodeploy
+ExecStart=/usr/bin/pwsh -NoProfile -File /opt/autodeploy/Start-DeploymentServer.ps1 -ListenAddress 127.0.0.1 -Port 8080 -DataDir /opt/autodeploy/server-data
+Restart=on-failure
+RestartSec=5
+# Hardening: the service only needs its own tree
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/autodeploy/server-data /home/deploy/.local /tmp
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

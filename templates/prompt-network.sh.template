@@ -1,0 +1,62 @@
+# >>> veeam-autodeploy (generated): ask for name + network at install time (-PromptIso) >>>
+# Inserted into the VIA's own %pre, before it writes /tmp/pre-network.cfg. Switches to a free
+# console, asks for hostname and the settings of NIC 1 and (when the VM has one) NIC 2, checks
+# every answer, shows a summary and only continues after "y". Nothing installs until then.
+# The answers become shell variables that the VIA's unquoted network heredoc expands.
+# Tokens: DEF_MASK DEF_GW DEF_DNS DEF_MASK2 (defaults, may be empty)
+VAD_NICS=$(for n in /sys/class/net/*; do [ -e "$n/device" ] || continue; echo "$(readlink -f "$n/device") ${n##*/}"; done | sort | cut -d' ' -f2)
+VAD_NIC1=$(echo "$VAD_NICS" | sed -n 1p)
+VAD_NIC2=$(echo "$VAD_NICS" | sed -n 2p)
+exec 3<&0 4>&1 5>&2
+VAD_VT=$(fgconsole 2>/dev/null || echo 1)
+if command -v chvt >/dev/null 2>&1; then exec </dev/tty8 >/dev/tty8 2>&1; chvt 8; else exec </dev/tty1 >/dev/tty1 2>&1; fi
+vad_ip4()  { local IFS=.; set -- $1; [ $# -eq 4 ] || return 1; for o; do case $o in ''|*[!0-9]*) return 1;; esac; [ "$o" -le 255 ] || return 1; done; }
+vad_mask() { vad_ip4 "$1" || return 1; case "$1" in 255.255.255.255|255.255.255.254|255.255.255.252|255.255.255.248|255.255.255.240|255.255.255.224|255.255.255.192|255.255.255.128|255.255.255.0|255.255.254.0|255.255.252.0|255.255.248.0|255.255.240.0|255.255.224.0|255.255.192.0|255.255.128.0|255.255.0.0|255.254.0.0|255.252.0.0|255.248.0.0|255.240.0.0|255.224.0.0|255.192.0.0|255.128.0.0|255.0.0.0) return 0;; esac; return 1; }
+vad_host() { echo "$1" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'; }
+vad_dns()  { [ -n "$1" ] || return 1; local d; for d in $(echo "$1" | tr ',' ' '); do vad_ip4 "$d" || return 1; done; }
+vad_opt2() { [ "$1" = "-" ] || vad_ip4 "$1"; }
+vad_ask()  {  # vad_ask VAR "question" "default" validator
+    local a
+    while :; do
+        printf '  %s%s: ' "$2" "${3:+ [$3]}"; read -r a || { echo; echo "veeam-autodeploy: no console input - stopping the install."; exit 1; }; a=${a:-$3}
+        if $4 "$a"; then eval "$1=\$a"; return 0; fi
+        echo "    -> not valid, please try again."
+    done
+}
+while :; do
+    clear
+    echo "================================================================="
+    echo " Veeam Infrastructure Appliance - AutoDeploy"
+    echo " Enter the name and network for THIS appliance."
+    echo " Network adapters found: $(echo $VAD_NICS)"
+    echo " Enter keeps the value in [brackets]. Nothing installs until you type y at the end."
+    echo "================================================================="
+    vad_ask VAD_HOST "Hostname (FQDN)" "${VAD_HOST:-}" vad_host
+    echo " NIC 1 ($VAD_NIC1) - management, default route:"
+    vad_ask VAD_IP   "IP address" "${VAD_IP:-}" vad_ip4
+    vad_ask VAD_MASK "Netmask" "${VAD_MASK:-{{DEF_MASK}}}" vad_mask
+    vad_ask VAD_GW   "Gateway" "${VAD_GW:-{{DEF_GW}}}" vad_ip4
+    vad_ask VAD_DNS  "DNS server(s), comma-separated" "${VAD_DNS:-{{DEF_DNS}}}" vad_dns
+    VAD_P2=${VAD_IP2:-}; VAD_PM2=${VAD_MASK2:-{{DEF_MASK2}}}; VAD_IP2=''; VAD_MASK2=''
+    if [ -n "$VAD_NIC2" ]; then
+        echo " NIC 2 ($VAD_NIC2) - static, no gateway (type - to leave NIC 2 unconfigured):"
+        vad_ask VAD_IP2 "IP address" "$VAD_P2" vad_opt2
+        [ "$VAD_IP2" = "-" ] && VAD_IP2=''
+        [ -n "$VAD_IP2" ] && vad_ask VAD_MASK2 "Netmask" "$VAD_PM2" vad_mask
+    fi
+    echo "-----------------------------------------------------------------"
+    echo "  Hostname : $VAD_HOST"
+    echo "  NIC 1    : $VAD_NIC1  $VAD_IP / $VAD_MASK  gw $VAD_GW  dns $VAD_DNS"
+    if [ -n "$VAD_IP2" ]; then echo "  NIC 2    : $VAD_NIC2  $VAD_IP2 / $VAD_MASK2  (no gateway)"; else echo "  NIC 2    : not configured"; fi
+    echo "  The install WIPES ALL DISKS of this VM."
+    printf '  Install with these settings? [y/N]: '; read -r VAD_OK
+    case "$VAD_OK" in y|Y|yes|YES) break;; esac
+done
+VAD_NET2=''
+[ -n "$VAD_IP2" ] && VAD_NET2="network --bootproto=static --device=${VAD_NIC2} --ip=${VAD_IP2} --netmask=${VAD_MASK2} --nodefroute --onboot=yes --activate"
+echo "  Starting the installation..."
+exec 0<&3 1>&4 2>&5 3<&- 4>&- 5>&-
+command -v chvt >/dev/null 2>&1 && chvt "$VAD_VT"
+echo "veeam-autodeploy: host=${VAD_HOST} nic1=${VAD_NIC1}:${VAD_IP} nic2=${VAD_NIC2}:${VAD_IP2:-none}"
+# <<< veeam-autodeploy <<<
+

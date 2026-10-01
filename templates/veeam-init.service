@@ -1,0 +1,10 @@
+[Unit]
+Description=One-shot daemon to run /opt/veeam/hostmanager/veeamhostmanager at next boot
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/etc/veeam/veeam-init.sh
+RemainAfterExit=no
+[Install]
+WantedBy=multi-user.target

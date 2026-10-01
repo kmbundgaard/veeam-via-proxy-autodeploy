@@ -1,0 +1,2 @@
+vbr,hostname,ip,netmask,gateway,dns,cluster,datastore,folder,portgroup,role,tasks
+vbr01,<fqdn-hostname>,<ip>,<netmask>,<gateway>,<dns>,<cluster>,<datastore-or-SDRS-cluster>,<vm-folder>,<portgroup>,viproxy,12

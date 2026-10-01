@@ -1,0 +1,5 @@
+AutoDeploy Proxies toolkit - Veeam Infrastructure Appliance 13.1 backup proxies on vSphere
+Version: 1.2.0
+Built:   2026-10-01 15:54
+Files:   22 (+ this file)
+Start with START-HERE.md.

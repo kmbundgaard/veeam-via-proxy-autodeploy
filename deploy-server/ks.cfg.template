@@ -1,0 +1,88 @@
+# =============================================================================
+# ks.cfg.template  -  unattended Rocky Linux 9 install for the DEPLOYMENT SERVER
+# =============================================================================
+# Rendered by Build-DeployServerIso.ps1 and embedded as /ks.cfg in a repacked Rocky 9 minimal ISO.
+# Result: a hardened-enough minimal Rocky host with pwsh 7, xorriso, PowerCLI (for the 'deploy'
+# user), the project in /opt/autodeploy and the deployment-server systemd unit enabled.
+# Everything is installed from the ISO's /payload folder, so it works at a dark site; when the RPM
+# install cannot resolve a dependency offline it retries online (lab convenience).
+# Tokens: HOSTNAME IP NETMASK GATEWAY DNS TIMEZONE KEYBOARD SSH_KEY_LINES USER_LINE SUDO_NOPASSWD
+# SSH_KEY_LINES = one 'sshkey --username=deploy "<key>"' line per public key given to the builder.
+# -----------------------------------------------------------------------------
+text
+lang en_US.UTF-8
+keyboard --xlayouts='{{KEYBOARD}}'
+timezone {{TIMEZONE}} --utc
+network --bootproto=static --device=link --ip={{IP}} --netmask={{NETMASK}} --gateway={{GATEWAY}} --nameserver={{DNS}} --hostname={{HOSTNAME}} --onboot=on --activate
+rootpw --lock
+{{USER_LINE}}
+{{SSH_KEY_LINES}}
+# Only SSH. Rocky's default public zone also opens cockpit and dhcpv6-client; neither is used here.
+firewall --enabled --service=ssh --remove-service=cockpit --remove-service=dhcpv6-client
+selinux --enforcing
+services --enabled=sshd,chronyd
+zerombr
+clearpart --all --initlabel
+autopart --type=lvm
+# No net.ifnames=0 here: the installer boots WITHOUT it and writes the static profile for the
+# predictable NIC name (ens192 on vmxnet3). With the option the installed system renames the NIC
+# to eth0, the profile no longer matches and NetworkManager falls back to DHCP (lab, 2026-09-25).
+bootloader
+# The VM script waits for the power-off, detaches the ISO and powers on again - so the freshly
+# installed system never boots with the installer ISO still attached (no reinstall loop).
+poweroff
+
+%packages
+@^minimal-environment
+openssh-server
+chrony
+tar
+python3
+curl
+-iwl*firmware
+%end
+
+%post --nochroot --log=/mnt/sysimage/root/ks-post-nochroot.log
+set -x
+mkdir -p /mnt/sysimage/opt/autodeploy-payload
+cp -r /run/install/repo/payload/. /mnt/sysimage/opt/autodeploy-payload/
+%end
+
+%post --log=/root/ks-post.log
+set -x
+P=/opt/autodeploy-payload
+
+# 1. the project
+mkdir -p /opt/autodeploy/server-data/iso /opt/autodeploy/server-data/secrets /opt/autodeploy/server-data/runs
+cp -r "$P/project/." /opt/autodeploy/
+if [ -d "$P/iso" ]; then cp "$P"/iso/*.iso /opt/autodeploy/server-data/iso/ 2>/dev/null || true; fi
+
+# 2. pwsh 7 + xorriso (+ deps) from the payload; fall back to online resolution if a dependency is missing
+if ! dnf -y install --disablerepo='*' "$P"/rpms/*.rpm; then
+    echo "offline RPM install incomplete - retrying with online repositories"
+    dnf -y install "$P"/rpms/*.rpm || echo "WARNING: RPM install failed; install powershell + xorriso manually"
+fi
+dnf -y install open-vm-tools 2>/dev/null && systemctl enable vmtoolsd || echo "open-vm-tools not installed (offline) - optional"
+
+# 3. PowerCLI for the deploy user (module folders copied from the build machine's Save-Module output)
+install -d -o deploy -g deploy -m 755 /home/deploy/.local /home/deploy/.local/share /home/deploy/.local/share/powershell /home/deploy/.local/share/powershell/Modules
+if [ -d "$P/powershell-modules" ]; then cp -r "$P/powershell-modules/." /home/deploy/.local/share/powershell/Modules/; fi
+
+# 4. ownership, sudo, sshd policy
+chown -R deploy:deploy /opt/autodeploy /home/deploy/.local
+chmod 700 /opt/autodeploy/server-data/secrets /opt/autodeploy/server-data/runs
+# sudo: with no account password (key-only build) sudo cannot ask for one, so it is passwordless. When a
+# password hash was given, the wheel rule applies and sudo asks for that password.
+if [ "{{SUDO_NOPASSWD}}" = "yes" ]; then echo 'deploy ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/deploy && chmod 440 /etc/sudoers.d/deploy; fi
+# SSH is ALWAYS key-only, whatever the console password setting: a password on the account is for the
+# VM console and for sudo, never for SSH. Only the deploy account may log in over SSH.
+# Named 10-*: sshd takes the FIRST value it sees and Rocky's own 50-redhat.conf sets X11Forwarding yes.
+printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\nX11Forwarding no\nAllowUsers deploy\n' > /etc/ssh/sshd_config.d/10-autodeploy.conf
+
+# 5. the deployment server as a service (localhost:8080; reach it through an SSH tunnel)
+cp /opt/autodeploy/deployment-server.service.example /etc/systemd/system/deployment-server.service
+systemctl enable deployment-server
+
+rm -rf "$P"
+echo "autodeploy deployment server provisioned: $(date)" > /opt/autodeploy/PROVISIONED.txt
+%end
