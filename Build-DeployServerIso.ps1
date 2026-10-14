@@ -11,7 +11,7 @@
 
     Payload assembled by this script:
       /payload/project/             this folder (scripts, templates, planner, docs; no secrets/CSVs)
-      /payload/rpms/*.rpm           powershell-7.x rh, xorriso, libisoburn, libisofs, libburn, libicu  (-RpmDir)
+      /payload/rpms/*.rpm           powershell-7.x rh, xorriso, libisoburn, libisofs, libburn, libicu, rsync  (-RpmDir)
       /payload/powershell-modules/  VMware.VimAutomation.Core + .Vds and their dependency closure (from the build host's PowerCLI)
       /payload/iso/*.iso            optional appliance ISOs to pre-load into server-data/iso (-IncludeIso)
 
@@ -25,7 +25,7 @@
 .EXAMPLE
     pwsh -File ./Build-DeployServerIso.ps1 -RockyIso ~/iso/Rocky-9.8-x86_64-minimal.iso -OutIso ~/iso/deploy-server.iso `
         -Hostname deploy01.lab.example -Ip 10.10.1.20 -Netmask 255.255.255.0 -Gateway 10.10.1.1 -Dns 10.10.1.5 `
-        -RpmDir ~/payload/rpms -IncludeIso ~/iso/VeeamInfrastructureAppliance_13.1.1.18_20260825.iso
+        -RpmDir ~/payload/rpms -IncludeIso ~/iso/VeeamInfrastructureAppliance_13.1.1.18_20260825.iso,~/iso/VeeamSoftwareAppliance_13.1.1.18_20260825.iso
 #>
 [CmdletBinding()]
 param(
@@ -116,6 +116,10 @@ foreach ($pair in @(@('Ip', $Ip), @('Netmask', $Netmask), @('Gateway', $Gateway)
 # 'pwsh -File' hands arrays over as plain strings ("a," "b"), so also accept one comma/semicolon-separated value.
 $keyFiles = @($SshPublicKeyFile | ForEach-Object { $_ -split '[,;]' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } |
                ForEach-Object { if ($_ -match '^~[\\/]') { Join-Path $HOME $_.Substring(2) } else { $_ } })   # '~' inside quotes is not expanded by the shell
+# Same for the appliance ISOs (-IncludeIso 'via.iso,vsa.iso'); checked here, before the slow payload copy.
+$IncludeIso = @($IncludeIso | ForEach-Object { $_ -split '[,;]' } | ForEach-Object { $_.Trim() } | Where-Object { $_ } |
+               ForEach-Object { if ($_ -match '^~[\\/]') { Join-Path $HOME $_.Substring(2) } else { $_ } })
+foreach ($i in $IncludeIso) { if (-not (Test-Path -LiteralPath $i -PathType Leaf)) { throw "-IncludeIso: ISO not found: $i" } }
 $sshKeyLines = foreach ($kf in $keyFiles) {
     if (-not (Test-Path -LiteralPath $kf -PathType Leaf)) { throw "SSH public key file not found: '$kf'" }
     $raw = Get-Content -LiteralPath $kf -Raw
@@ -131,10 +135,11 @@ $sshKeyLines = foreach ($kf in $keyFiles) {
 $sshKeyLines = @($sshKeyLines)
 if (-not $sshKeyLines.Count) { throw "No SSH public key found in: $($keyFiles -join ', ')" }
 $rpms = @(Get-ChildItem -LiteralPath $RpmDir -Filter '*.rpm')
-$missingRpms = @(foreach ($need in @('powershell-', 'xorriso-', 'libisoburn-', 'libisofs-', 'libburn-', 'libicu-')) { if (-not ($rpms | Where-Object { $_.Name -like "$need*" })) { $need + '*.rpm' } })
+$missingRpms = @(foreach ($need in @('powershell-', 'xorriso-', 'libisoburn-', 'libisofs-', 'libburn-', 'libicu-', 'rsync-')) { if (-not ($rpms | Where-Object { $_.Name -like "$need*" })) { $need + '*.rpm' } })
 if ($missingRpms.Count) {
     throw (("RpmDir '{0}' is missing: {1}. Present: {2}. Needed: powershell (github.com/PowerShell/PowerShell/releases, the .rh.x86_64.rpm), " +
-            "xorriso + libisoburn + libisofs + libburn (Rocky 9 AppStream) and libicu (Rocky 9 BaseOS) - see START-HERE.md for the download links.") -f $RpmDir, ($missingRpms -join ', '), $(if ($rpms.Count) { ($rpms.Name -join ', ') } else { 'nothing' }))
+            "xorriso + libisoburn + libisofs + libburn (Rocky 9 AppStream), libicu and rsync (Rocky 9 BaseOS; rsync built for the SAME Rocky minor as -RockyIso, " +
+            "e.g. rsync-3.2.5-7.el9_8.2 for 9.8 - 3.2.7 needs a newer libacl than the 9.8 ISO installs) - see START-HERE.md for the download links.") -f $RpmDir, ($missingRpms -join ', '), $(if ($rpms.Count) { ($rpms.Name -join ', ') } else { 'nothing' }))
 }
 
 # --- work dir + payload -------------------------------------------------------------------------------

@@ -22,6 +22,12 @@ ISO uses the same host manager with `/proxy-ks.cfg` and label `VeeamJeOS`, and a
 | `veeam-init.sh.template` | shared   | `Initialize-IsoWorkspace`                  | First-boot script: applies the answer file, disables its unit, optionally shreds the answer file (`CLEANUP_ANSWER_FILE`). Installed to `/etc/veeam/veeam-init.sh`.                                                                        |
 | `veeam-init.service`     | shared   | copied                                       | systemd one-shot unit,`WantedBy=multi-user.target`, enabled in `%post`.                                                                                                                                                                   |
 
+**Veeam Software Appliance rows** (CSV `role` `vbr` / `em`, base ISO `VeeamSoftwareAppliance_13.1.x`):
+the same edits on `/vbr-ks.cfg` or `/vbem-ks.cfg` (same `%pre` network line, same
+`log "Veeam post install commands"` anchor), label `VeeamSA`, no `applianceRole.*` lines, and the
+grub default `Veeam Backup & Replication>Install - fresh install, wipes everything (including local backups)`
+or `Veeam Backup Enterprise Manager>Install - fresh install, wipes everything`.
+
 Secrets come from `../appliance-secrets.example.conf` (copy to a protected file, pass via
 `-ApplianceSecretsFile`). The fleet list is the CSV (build it with `../Fleet-Planner.html`).
 

@@ -1,10 +1,38 @@
-.DS_Store
-# Never commit secrets, settings, media or run output
-*.enc
-*.cred
-*.key
-*.iso
-*.log
+# Secrets never go into the repository: settings files, credentials, keys, encrypted blobs
 *.conf
 !appliance-secrets.example.conf
-DeployReport_*
+*.enc
+*.enc.info.json
+*.cred
+*.key
+*.pem
+*.ppk
+id_*
+!id_*.pub.example
+keys/
+
+# Large or generated artefacts
+*.iso
+*.zip
+*.zip.sha256
+rpms/
+iso/
+iso-staging/
+staging/
+server-data/
+DeployReport_*.csv
+*.log
+*-console-*.png
+*.replace.json
+_validate_*/
+_build_*/
+
+# Real fleet CSVs stay local; only the template and the sample are tracked
+*.csv
+!proxies-template.csv
+!proxies-vbr01.sample.csv
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/

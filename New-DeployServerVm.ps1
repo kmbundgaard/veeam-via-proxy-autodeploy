@@ -24,6 +24,9 @@ param(
     [Parameter(Mandatory)][string]$Ip,          # the static IP baked into the ISO's kickstart (used to wait for SSH)
     [int]$Cpu = 4, [int]$MemoryGB = 8, [int]$DiskGB = 100,
     [int]$InstallTimeoutSec = 2400,
+    # The ISO is already in [<datastore>] iso/<file name> (copied there another way, e.g. a rate-limited
+    # upload over a weak VPN): skip the upload. Its size must match -IsoPath, so a stale copy is refused.
+    [switch]$UseUploadedIso,
     [switch]$KeepIso
 )
 Set-StrictMode -Version Latest
@@ -48,10 +51,19 @@ try {
     # upload ISO
     $isoDs = if ($ds -is [VMware.VimAutomation.ViCore.Types.V1.DatastoreManagement.DatastoreCluster]) { Get-Datastore -RelatedObject $ds | Sort-Object FreeSpaceGB -Descending | Select-Object -First 1 } else { $ds }
     $leaf = Split-Path $IsoPath -Leaf
-    if ($PSCmdlet.ShouldProcess($isoDs.Name, "Upload $leaf")) {
+    if ($UseUploadedIso) {
         $drv = "dsiso_$([guid]::NewGuid().ToString('N').Substring(0,6))"
         New-PSDrive -Name $drv -PSProvider VimDatastore -Root '\' -Datastore $isoDs | Out-Null
-        try { if (-not (Test-Path "${drv}:\iso")) { New-Item -ItemType Directory -Path "${drv}:\iso" | Out-Null }; Copy-DatastoreItem -Item $IsoPath -Destination "${drv}:\iso\$leaf" -Force } finally { Remove-PSDrive $drv -ErrorAction SilentlyContinue }
+        try { $have = Get-Item "${drv}:\iso\$leaf" -ErrorAction SilentlyContinue } finally { Remove-PSDrive $drv -ErrorAction SilentlyContinue }
+        $want = (Get-Item -LiteralPath $IsoPath).Length
+        if (-not $have) { throw "-UseUploadedIso: [$($isoDs.Name)] iso/$leaf does not exist." }
+        if ($have.Length -ne $want) { throw "-UseUploadedIso: [$($isoDs.Name)] iso/$leaf is $($have.Length) bytes, the local ISO $want - upload incomplete or a different build." }
+        Log "Using the ISO already on [$($isoDs.Name)] iso/$leaf ($([math]::Round($want / 1MB)) MB, size matches)." 'OK'
+    }
+    elseif ($PSCmdlet.ShouldProcess($isoDs.Name, "Upload $leaf")) {
+        $drv = "dsiso_$([guid]::NewGuid().ToString('N').Substring(0,6))"
+        New-PSDrive -Name $drv -PSProvider VimDatastore -Root '\' -Datastore $isoDs | Out-Null
+        try { if (-not (Test-Path "${drv}:\iso")) { New-Item -ItemType Directory -Path "${drv}:\iso" | Out-Null }; for ($t = 1; ; $t++) { try { Copy-DatastoreItem -Item $IsoPath -Destination "${drv}:\iso\$leaf" -Force; break } catch { if ($t -ge 3) { throw }; Log "Upload failed (attempt $t/3): $($_.Exception.Message) - retrying in 30s." 'WARN'; Start-Sleep -Seconds 30 } } } finally { Remove-PSDrive $drv -ErrorAction SilentlyContinue }
         Log "Uploaded ISO to [$($isoDs.Name)] iso/$leaf" 'OK'
     }
     $isoDsPath = "[{0}] iso/{1}" -f $isoDs.Name, $leaf

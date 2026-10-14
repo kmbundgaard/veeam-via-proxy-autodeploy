@@ -3,7 +3,7 @@
 # console, asks for hostname and the settings of NIC 1 and (when the VM has one) NIC 2, checks
 # every answer, shows a summary and only continues after "y". Nothing installs until then.
 # The answers become shell variables that the VIA's unquoted network heredoc expands.
-# Tokens: DEF_MASK DEF_GW DEF_DNS DEF_MASK2 (defaults, may be empty)
+# Tokens: DEF_MASK DEF_GW DEF_DNS DEF_SEARCH DEF_MASK2 (defaults, may be empty)
 VAD_NICS=$(for n in /sys/class/net/*; do [ -e "$n/device" ] || continue; echo "$(readlink -f "$n/device") ${n##*/}"; done | sort | cut -d' ' -f2)
 VAD_NIC1=$(echo "$VAD_NICS" | sed -n 1p)
 VAD_NIC2=$(echo "$VAD_NICS" | sed -n 2p)
@@ -15,6 +15,7 @@ vad_mask() { vad_ip4 "$1" || return 1; case "$1" in 255.255.255.255|255.255.255.
 vad_host() { echo "$1" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'; }
 vad_dns()  { [ -n "$1" ] || return 1; local d; for d in $(echo "$1" | tr ',' ' '); do vad_ip4 "$d" || return 1; done; }
 vad_opt2() { [ "$1" = "-" ] || vad_ip4 "$1"; }
+vad_srch() { [ "$1" = "-" ] && return 0; [ -n "$1" ] || return 1; local d; for d in $(echo "$1" | tr ',' ' '); do vad_host "$d" || return 1; done; }
 vad_ask()  {  # vad_ask VAR "question" "default" validator
     local a
     while :; do
@@ -37,6 +38,8 @@ while :; do
     vad_ask VAD_MASK "Netmask" "${VAD_MASK:-{{DEF_MASK}}}" vad_mask
     vad_ask VAD_GW   "Gateway" "${VAD_GW:-{{DEF_GW}}}" vad_ip4
     vad_ask VAD_DNS  "DNS server(s), comma-separated" "${VAD_DNS:-{{DEF_DNS}}}" vad_dns
+    VAD_DOM=''; case "$VAD_HOST" in *.*) VAD_DOM=${VAD_HOST#*.};; esac
+    vad_ask VAD_SEARCH "DNS search domain(s), comma-separated (- = none)" "${VAD_SEARCH:-${VAD_DOM:-{{DEF_SEARCH}}}}" vad_srch
     VAD_P2=${VAD_IP2:-}; VAD_PM2=${VAD_MASK2:-{{DEF_MASK2}}}; VAD_IP2=''; VAD_MASK2=''
     if [ -n "$VAD_NIC2" ]; then
         echo " NIC 2 ($VAD_NIC2) - static, no gateway (type - to leave NIC 2 unconfigured):"
@@ -47,11 +50,14 @@ while :; do
     echo "-----------------------------------------------------------------"
     echo "  Hostname : $VAD_HOST"
     echo "  NIC 1    : $VAD_NIC1  $VAD_IP / $VAD_MASK  gw $VAD_GW  dns $VAD_DNS"
+    echo "  Search   : $([ "$VAD_SEARCH" = "-" ] && echo none || echo "$VAD_SEARCH")"
     if [ -n "$VAD_IP2" ]; then echo "  NIC 2    : $VAD_NIC2  $VAD_IP2 / $VAD_MASK2  (no gateway)"; else echo "  NIC 2    : not configured"; fi
     echo "  The install WIPES ALL DISKS of this VM."
     printf '  Install with these settings? [y/N]: '; read -r VAD_OK
     case "$VAD_OK" in y|Y|yes|YES) break;; esac
 done
+VAD_SRCH_OPT=''
+[ -n "$VAD_SEARCH" ] && [ "$VAD_SEARCH" != "-" ] && VAD_SRCH_OPT="--ipv4-dns-search=${VAD_SEARCH}"
 VAD_NET2=''
 [ -n "$VAD_IP2" ] && VAD_NET2="network --bootproto=static --device=${VAD_NIC2} --ip=${VAD_IP2} --netmask=${VAD_MASK2} --nodefroute --onboot=yes --activate"
 echo "  Starting the installation..."

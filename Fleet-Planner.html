@@ -239,7 +239,7 @@
             </details>
             <div class="grid2">
               <label class="f"><span class="l">Task slots per proxy</span><input type="number" id="g_tasks" min="1" max="100" value="12"></label>
-              <label class="f"><span class="l">Role</span><select id="g_role"><option value="viproxy">viproxy (VMware Linux proxy)</option><option value="gateway">gateway (Data Domain / StoreOnce gateway server)</option><option value="viproxy+gateway">viproxy+gateway (both)</option></select></label>
+              <label class="f"><span class="l">Role</span><select id="g_role"><option value="viproxy">viproxy (VMware Linux proxy)</option><option value="gateway">gateway (Data Domain / StoreOnce gateway server)</option><option value="viproxy+gateway">viproxy+gateway (both)</option><option value="vbr">vbr (Software Appliance: Backup &amp; Replication server)</option><option value="em">em (Software Appliance: Enterprise Manager)</option></select></label>
             </div>
             <label class="f" id="g_gwrepo_f" hidden><span class="l">Gateway for repositories (optional, <code>;</code>-separated)</span><input type="text" id="g_gwrepo" placeholder="DD-Repo01;StoreOnce-Repo01" aria-describedby="g_gwrepo_h"><span class="hint" id="g_gwrepo_h">Existing Dell Data Domain or HPE StoreOnce repositories. Empty = the appliance is only added as a managed server and can be picked as gateway in the repository settings.</span></label>
             <div class="actions">
@@ -270,7 +270,7 @@
           <p>1. Build the fleet here. Fix every red issue; amber ones are judgement calls.</p>
           <p>2. Export the CSV and copy it, the base 13.1 ISO and one settings file per VBR to the deploy host.</p>
           <p>3. Run the generated <b>Validate</b> command first, then <b>What-if</b>, then the real run, one VBR at a time.</p>
-          <p>The CSV columns are exactly what <code>Deploy-VeeamProxies.ps1</code> reads. Optional columns are exported only when a row uses them: <code>ip2</code>, <code>netmask2</code>, <code>portgroup2</code> (a second network adapter with a static address and no default route; all three together), <code>gatewayrepo</code> (for role <code>gateway</code> or <code>viproxy+gateway</code>: existing Dell Data Domain / HPE StoreOnce repositories, <code>;</code>-separated, whose gateway server list gets this appliance), <code>handshakecode</code> (an appliance re-homed from another VBR) and <code>vbrname</code> (the FQDN or IP the VBR should use to add the proxy when it differs from the kickstart hostname, for example when DNS has no record yet).</p>
+          <p>The CSV columns are exactly what <code>Deploy-VeeamProxies.ps1</code> reads. Optional columns are exported only when a row uses them: <code>ip2</code>, <code>netmask2</code>, <code>portgroup2</code> (a second network adapter with a static address and no default route; all three together), <code>gatewayrepo</code> (for role <code>gateway</code> or <code>viproxy+gateway</code>: existing Dell Data Domain / HPE StoreOnce repositories, <code>;</code>-separated, whose gateway server list gets this appliance), <code>dnssearch</code> (DNS search domains, <code>,</code>-separated, set on NIC 1), <code>handshakecode</code> (an appliance re-homed from another VBR) and <code>vbrname</code> (the FQDN or IP the VBR should use to add the proxy when it differs from the kickstart hostname, for example when DNS has no record yet).</p>
         </div>
       </details>
     </div>
@@ -285,7 +285,7 @@
           <label class="btn fileb">Import CSV<input type="file" id="fileImport" accept=".csv,text/csv" aria-label="Import CSV file"></label>
           <button type="button" class="btn" id="btnPaste">Paste CSV</button>
           <button type="button" class="btn" id="btnSort">Sort by VBR, host</button>
-          <label class="small" style="display:inline-flex;gap:6px;align-items:center;"><input type="checkbox" id="showHs"> optional columns (handshakecode, vbrname, gatewayrepo, ip2, netmask2, portgroup2)</label>
+          <label class="small" style="display:inline-flex;gap:6px;align-items:center;"><input type="checkbox" id="showHs"> optional columns (handshakecode, vbrname, gatewayrepo, dnssearch, ip2, netmask2, portgroup2)</label>
           <button type="button" class="btn quiet danger" id="btnClear">Clear all</button>
         </div>
       </div>
@@ -301,7 +301,7 @@
               <th class="col-w-vbr">vbr</th><th class="col-w-host">hostname</th><th class="col-w-ip">ip</th><th class="col-w-mask">netmask</th>
               <th class="col-w-gw">gateway</th><th class="col-w-dns">dns</th><th class="col-w-cl">cluster</th><th class="col-w-ds">datastore</th>
               <th class="col-w-fold">folder</th><th class="col-w-pg">portgroup</th><th class="col-w-role">role</th><th class="col-w-tasks">tasks</th>
-              <th class="col-w-hs hs" hidden>handshakecode</th><th class="col-w-host hs" hidden>vbrname</th><th class="col-w-host hs" hidden>gatewayrepo</th><th class="col-w-ip hs" hidden>ip2</th><th class="col-w-mask hs" hidden>netmask2</th><th class="col-w-pg hs" hidden>portgroup2</th><th class="ops"></th>
+              <th class="col-w-hs hs" hidden>handshakecode</th><th class="col-w-host hs" hidden>vbrname</th><th class="col-w-host hs" hidden>gatewayrepo</th><th class="col-w-host hs" hidden>dnssearch</th><th class="col-w-ip hs" hidden>ip2</th><th class="col-w-mask hs" hidden>netmask2</th><th class="col-w-pg hs" hidden>portgroup2</th><th class="ops"></th>
             </tr>
           </thead>
           <tbody id="fleetBody"></tbody>
@@ -435,12 +435,18 @@
   const HS = 'handshakecode';
   const VN = 'vbrname';
   const GR = 'gatewayrepo';
+  const DS = 'dnssearch';
   const IP2 = 'ip2', NM2 = 'netmask2', PG2 = 'portgroup2';
   const NIC2 = [IP2, NM2, PG2];                       // second network adapter: all three or none
-  const OPTIONAL = [HS, VN, GR, IP2, NM2, PG2];
+  const OPTIONAL = [HS, VN, GR, DS, IP2, NM2, PG2];
   const ROLES = ['viproxy', 'gateway'];
+  // Veeam Software Appliance roles: a whole backup server / Enterprise Manager, built from the
+  // VeeamSoftwareAppliance ISO (boot entry picks the product), never combined, never registered to a VBR.
+  const VSA_ROLES = ['vbr', 'em'];
+  const isVsa = (r) => roleParts(r.role).some(x => VSA_ROLES.includes(x));
+  const groupIsVsa = (k) => { const rs = state.rows.filter(r => (r.vbr || '(no vbr)') === k); return rs.length > 0 && rs.every(isVsa); };
   const roleParts = (role) => (role || '').toLowerCase().split(/[+;, ]+/).filter(Boolean);
-  const MONO = new Set(['vbr','hostname','ip','netmask','gateway','dns','tasks',HS,VN,IP2,NM2]);
+  const MONO = new Set(['vbr','hostname','ip','netmask','gateway','dns','tasks',HS,VN,DS,IP2,NM2]);
   const LS_KEY = 'veeam-fleet-planner-v1';
   const LISTS = { cluster: 'dl_cluster', datastore: 'dl_datastore', folder: 'dl_folder', portgroup: 'dl_portgroup' };
   let inv = null;   // vSphere inventory loaded from the deployment server (not persisted)
@@ -521,17 +527,25 @@
       if (!r.dns) P.warn.push('dns is empty (kickstart --nameserver will be blank)');
       else { const bad = r.dns.split(',').map(s => s.trim()).filter(s => s && !isIPv4(s)); if (bad.length) P.bad.push(`dns has non-IPv4 entries: ${bad.join(', ')}`); }
       const parts = roleParts(r.role), isProxy = parts.includes('viproxy'), isGw = parts.includes('gateway');
-      const unknown = parts.filter(x => !ROLES.includes(x));
-      if (unknown.length) P.bad.push(`role "${r.role}" is not valid: use viproxy, gateway or viproxy+gateway`);
+      const unknown = parts.filter(x => !ROLES.includes(x) && !VSA_ROLES.includes(x));
+      if (unknown.length) P.bad.push(`role "${r.role}" is not valid: use viproxy, gateway, viproxy+gateway, vbr or em`);
+      if (isVsa(r)) {
+        if (parts.length > 1) P.bad.push('vbr and em are whole Software Appliances: they cannot be combined with another role');
+        const mix = state.rows.some(o => (o.vbr || '') === (r.vbr || '') && o.role && !isVsa(o));
+        if (mix) P.bad.push(`VBR key "${r.vbr}" mixes Software Appliance rows (vbr / em) with proxy / gateway rows: they need different ISOs - give them their own key`);
+        for (const k of [GR, HS, VN]) if (r[k]) P.warn.push(`${k} is ignored for a Software Appliance row`);
+      }
       if (!r.role) P.warn.push('role is empty (the appliance is only added as a managed server)');
       if (r[GR] && !isGw) P.bad.push('gatewayrepo is set but the role has no gateway (use gateway or viproxy+gateway)');
       if (isGw && !r[GR]) P.warn.push('gateway without gatewayrepo: the appliance is added as a managed server only; pick it as gateway in the Data Domain / StoreOnce repository settings');
       const t = Number(r.tasks);
-      if (!isProxy && !r.tasks) { /* gateway-only: no task slots */ }
+      if (!isProxy && !r.tasks) { /* gateway-only or Software Appliance: no task slots */ }
+      else if (isVsa(r)) P.warn.push('tasks is ignored for a Software Appliance row');
       else if (!r.tasks || !Number.isInteger(t) || t < 1 || t > 100) P.bad.push('tasks must be an integer 1–100');
       else if (t > state.sizing.cpu * 2) P.warn.push(`tasks ${t} is more than 2× the ${state.sizing.cpu} vCPU sizing (heavy oversubscription)`);
       if (r[HS] && !/^\d{6}$/.test(r[HS])) P.bad.push('handshakecode must be 6 digits');
       if (r[VN] && !(isIPv4(r[VN]) || isHost(r[VN]))) P.bad.push('vbrname must be an FQDN or IPv4 address the VBR can reach');
+      if (r[DS]) { const bad = r[DS].split(/[,; ]+/).filter(d => d && !isHost(d)); if (bad.length) P.bad.push(`dnssearch has invalid domain names: ${bad.join(', ')}`); }
       const n2 = NIC2.filter(k => r[k]);
       if (n2.length && n2.length < 3) P.bad.push(`second NIC needs ip2, netmask2 and portgroup2 together (given: ${n2.join(', ')})`);
       if (r[IP2]) {
@@ -541,7 +555,7 @@
         if (r[NM2] && !isMask(r[NM2])) P.bad.push('netmask2 is not a valid netmask');
         if (isIPv4(r[IP2]) && isIPv4(r.ip) && isMask(r.netmask) && same(r.ip, r[IP2], r.netmask)) P.warn.push('ip2 is in the same subnet as ip: two adapters in one network is usually a mistake');
       }
-      if (!r[VN] && r.hostname && !r.hostname.includes('.')) P.warn.push('no vbrname and the hostname has no domain: the VBR must be able to resolve it, or set vbrname to the IP');
+      if (!isVsa(r) && !r[VN] && r.hostname && !r.hostname.includes('.')) P.warn.push('no vbrname and the hostname has no domain: the VBR must be able to resolve it, or set vbrname to the IP');
     });
     return perRow;
   }
@@ -560,6 +574,7 @@
         `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${HS}" class="mono" value="${esc(r[HS])}" aria-label="handshakecode row ${i + 1}" placeholder="000000"></td>` +
         `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${VN}" class="mono" value="${esc(r[VN])}" aria-label="vbrname row ${i + 1}" placeholder="(defaults to hostname)"></td>` +
         `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${GR}" value="${esc(r[GR])}" aria-label="gatewayrepo row ${i + 1}" placeholder="(gateway rows: DD / StoreOnce repos)"></td>` +
+        `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${DS}" class="mono" value="${esc(r[DS])}" aria-label="dnssearch row ${i + 1}" placeholder="(none)"></td>` +
         `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${IP2}" class="mono" value="${esc(r[IP2])}" aria-label="ip2 row ${i + 1}" placeholder="(2nd NIC)"></td>` +
         `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${NM2}" class="mono" value="${esc(r[NM2])}" aria-label="netmask2 row ${i + 1}"></td>` +
         `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${PG2}" value="${esc(r[PG2])}" aria-label="portgroup2 row ${i + 1}" list="dl_portgroup"></td>` +
@@ -722,6 +737,22 @@
       const v = state.vbrs[k] || {};
       const vbr = v.server || `<${k}-server>`, sec = v.secrets || `appliance-secrets-${k}.conf`;
       const base = `${invoke} -CsvPath ${pfx}${csv} -Vbr ${k}`;
+      if (groupIsVsa(k)) {
+        // Software Appliance group: Stage A only, product sizing from the script, the VSA ISO as base.
+        const viso = /SoftwareAppliance/i.test(iso) ? iso : '<VeeamSoftwareAppliance_13.1.x.iso>';
+        const va = `${base}${cont}-ApplianceSecretsFile ${pfx}${sec}${cont}-BaseIso ${pfx}${viso} -ValidateOnly`;
+        const vc1 = `${base}${cont}-vCenterServer ${vc}${vcUser ? ' -vCenterUser ' + vcUser : ''} -BaseIso ${pfx}${viso}${cont}-ApplianceSecretsFile ${pfx}${sec}`;
+        const vsteps = isoOnly
+          ? [['1 · Validate (offline)', va], ['2 · Build one ISO per appliance + VM build sheet (no vCenter, output in iso-out/)', `${base}${cont}-IsoOnly -BaseIso ${pfx}${viso}${cont}-ApplianceSecretsFile ${pfx}${sec}`]]
+          : [['1 · Validate (offline)', va], ['2 · What-if (connects to vCenter, changes nothing)', `${vc1} -WhatIf`], ['3 · Deploy (no VBR registration: these ARE the servers)', `${vc1}${$('c_rb').checked ? ' -RollbackOnFailure' : ''}`]];
+        const vb = document.createElement('div'); vb.className = 'cmdblock';
+        const nn = g.get(k).n;
+        vb.innerHTML = `<div class="cmdhead"><span class="t"><span class="mono">${esc(k)}</span> · ${nn} Software Appliance${nn === 1 ? '' : 's'} (vbr / em)</span><span class="grow"></span></div>` +
+          vsteps.map(([t, cmd]) => `<div class="cmdhead"><span class="small muted">${t}</span><span class="grow"></span><button type="button" class="btn quiet small" data-copy>Copy</button></div><pre>${esc(cmd)}</pre>`).join('') +
+          `<p class="hint">Sizing per product (backup server 8 vCPU / 16 GB, Enterprise Manager 4 vCPU / 16 GB, two 240 GB disks); the sizing panel and the role, transport and replace options apply to proxies only. Set <code>VEEAMADMIN_MFA_ENABLED=true</code> in the settings file: without MFA the appliance keeps the product unavailable until veeamadmin enrols in the Host Management Console.</p>`;
+        out.appendChild(vb);
+        continue;
+      }
       const a = `${base}${cont}-ApplianceSecretsFile ${pfx}${sec}${cont}-BaseIso ${pfx}${iso} -ValidateOnly${hw}`;
       const common = `${base}${cont}-vCenterServer ${vc}${vcUser ? ' -vCenterUser ' + vcUser : ''} -BaseIso ${pfx}${iso}${cont}-ApplianceSecretsFile ${pfx}${sec}${cont}-VBRServer ${vbr}${v.user ? ' -VBRUser ' + v.user : ''}` +
         ($('c_tls').checked ? ' -SkipTlsVerify' : '') + (v.mfa ? `${cont}-VBRMfaSecretFile ${pfx}${v.mfa}` : '') +
@@ -913,14 +944,20 @@
     const bad = state.rows.reduce((n, r, i) => n + ((r.vbr === vbr && lastVal[i] && lastVal[i].bad.length) ? 1 : 0), 0);
     if (bad) { toast(`${bad} row(s) for ${vbr} have errors. Fix them first.`); return; }
     const n = state.rows.filter(r => r.vbr === vbr).length;
-    const warn = {
+    const vsaRun = groupIsVsa(vbr);
+    if (vsaRun && ['RegisterOnly', 'IsoSingle', 'IsoPrompt'].includes(mode)) { toast('That mode does not apply to Software Appliance rows (vbr / em).'); return; }
+    const warn = vsaRun ? {
+      Rollback: `ROLLBACK: DELETE ${n} Software Appliance VM(s) of ${vbr} from vCenter. Continue?`,
+      Full: `Deploy ${n} Software Appliance VM(s) for ${vbr} (no VBR registration). Continue?`,
+      DeployOnly: `Deploy ${n} Software Appliance VM(s) for ${vbr}. Continue?`,
+    }[mode] : {
       Rollback: `ROLLBACK: remove ${n} proxy VM(s) of ${vbr} from the VBR and DELETE them from vCenter. Continue?`,
       Full: `Deploy AND register ${n} proxy VM(s) for ${vbr}. Continue?`,
       DeployOnly: `Deploy ${n} proxy VM(s) for ${vbr} without registration. Continue?`,
       RegisterOnly: `Register ${n} proxy VM(s) of ${vbr} on the VBR. Continue?`,
     }[mode];
     if (warn && !confirm(warn)) return;
-    if ($('c_replace').checked && ['Full', 'RegisterOnly', 'WhatIf'].includes(mode) && !confirm('Replace mode: proxies in this CSV that already exist in the VBR are removed from it (their job pinning is captured first and restored after), their VMs are powered off and renamed, and fresh appliances take their names and IPs. Continue?')) return;
+    if (!vsaRun && $('c_replace').checked && ['Full', 'RegisterOnly', 'WhatIf'].includes(mode) && !confirm('Replace mode: proxies in this CSV that already exist in the VBR are removed from it (their job pinning is captured first and restored after), their VMs are powered off and renamed, and fresh appliances take their names and IPs. Continue?')) return;
     const body = {
       csv: buildCsv(vbr), vbr, mode, iso: $('r_iso').value, settingsFile: $('r_settings').value,
       vcenter: { server: $('r_vc').value.trim(), user: $('r_vcuser').value.trim(), password: $('r_vcpass').value },
@@ -930,7 +967,9 @@
       vmCpu: state.sizing.cpu, vmMemoryGB: state.sizing.ram, vmDiskGB: state.sizing.disk, dataDiskGB: state.sizing.data || 0,
       logsOnDataDisk: !!(state.sizing.data && $('c_logs').checked),
     };
-    if ($('c_logs').checked && !state.sizing.data) { toast('Logs on disk 2 needs an extra data disk (sizing panel).'); return; }
+    // The sizing panel is the PROXY sizing: Software Appliance runs keep the per-product sizing.
+    if (vsaRun) { for (const k of ['vmCpu', 'vmMemoryGB', 'vmDiskGB', 'dataDiskGB']) body[k] = ''; body.logsOnDataDisk = false; body.replace = false; }
+    if (!vsaRun && $('c_logs').checked && !state.sizing.data) { toast('Logs on disk 2 needs an extra data disk (sizing panel).'); return; }
     $('r_run').disabled = true;
     try {
       const r = await api('/api/run', { method: 'POST', body: JSON.stringify(body) });

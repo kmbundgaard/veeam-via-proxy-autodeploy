@@ -4,6 +4,8 @@ This toolkit deploys Veeam Infrastructure Appliance (VIA) 13.1 backup proxies on
 from a CSV and registers them to their Veeam Backup & Replication (VBR) server. Everything it
 does uses Veeam's documented mechanisms: the unattended appliance ISO with an answer file,
 PowerCLI for vSphere, and the VBR REST API for registration. It runs fully offline.
+The same run also deploys the Veeam Software Appliance itself, as a Backup & Replication server or
+an Enterprise Manager (CSV role `vbr` / `em`).
 
 One appliance (proxy VM) belongs to exactly one VBR; that is a Veeam property of the appliance,
 not of this toolkit. One deployment server and one fleet CSV serve all your VBRs: the `vbr`
@@ -20,6 +22,8 @@ from the same server.
 | PowerShell 7 | [github.com/PowerShell/PowerShell/releases](https://github.com/PowerShell/PowerShell/releases): `powershell-7.x-1.rh.x86_64.rpm` for Option A, or the [install guide](https://learn.microsoft.com/powershell/scripting/install/install-rhel) for an existing host | Windows PowerShell 5.1 is not supported. |
 | xorriso, libisoburn, libisofs, libburn (Option A) | Rocky 9 AppStream: [Packages/x](https://dl.rockylinux.org/pub/rocky/9/AppStream/x86_64/os/Packages/x/) and [Packages/l](https://dl.rockylinux.org/pub/rocky/9/AppStream/x86_64/os/Packages/l/) | On an existing host: `dnf install xorriso`. |
 | libicu (Option A) | Rocky 9 BaseOS: [Packages/l](https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/Packages/l/) | Needed by PowerShell. |
+| rsync (Option A) | Rocky 9 BaseOS: [Packages/r](https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/Packages/r/) | Resumable copies of large ISOs to the server (`rsync --partial`). Take the build for the **same Rocky minor as the ISO** (9.8: `rsync-3.2.5-7.el9_8.2`); `3.2.7` needs a newer libacl than the 9.8 ISO installs. |
+| `VeeamSoftwareAppliance_13.1.x.iso` (optional) | [veeam.com/downloads](https://www.veeam.com/downloads.html) | Only to deploy backup servers or Enterprise Manager (CSV role `vbr` / `em`). 15 GB: copy it to the server with `rsync --partial` rather than baking it into the server ISO over a slow link. |
 | PowerCLI | [PowerShell Gallery, VCF.PowerCLI](https://www.powershellgallery.com/packages/VCF.PowerCLI): `Save-Module VCF.PowerCLI -Path ./PowerCLI` on a connected machine | Product page: [developer.broadcom.com/powercli](https://developer.broadcom.com/powercli). Includes the distributed-switch module. |
 | vCenter account | Your vCenter | Create VMs, upload ISOs, edit VM settings. |
 | VBR account | Your VBR | Add managed servers and proxies via REST; an MFA seed can be supplied. |
@@ -38,9 +42,9 @@ image that carries this toolkit, PowerShell, xorriso, PowerCLI and your applianc
 machine needs PowerShell 7, PowerCLI (for the VM step) and xorriso: on Linux or macOS install
 xorriso natively; on Windows it runs inside WSL (`wsl --install -d Ubuntu`, then
 `sudo apt install xorriso` in the distro, pass `-WslDistro Ubuntu` if it is not your default). All
-six RPMs from the table go into one folder, given as `-RpmDir`.
+seven RPMs from the table go into one folder, given as `-RpmDir`.
 `New-DeployServerVm.ps1` creates the VM, lets it install, detaches the ISO and boots it. Put the
-six RPMs from the table (PowerShell, xorriso, libisoburn, libisofs, libburn, libicu) in one folder
+seven RPMs from the table (PowerShell, xorriso, libisoburn, libisofs, libburn, libicu, rsync) in one folder
 and pass it as `-RpmDir`; the server installs them offline.
 
 ```bash
@@ -147,6 +151,12 @@ lines, then run `Deploy-VeeamProxies.ps1`. Section 1 of the usage guide lists th
    count.
 
 ## Good to know
+
+- **Backup servers and Enterprise Manager too.** A CSV row with `role` = `vbr` or `em` deploys a Veeam
+  Software Appliance (Backup & Replication server or Enterprise Manager) from the
+  `VeeamSoftwareAppliance_13.1.x.iso`: same settings file, same Stage A, two 240 GB disks, no
+  registration step. Keep those rows under their own `vbr` key. See section 4e of
+  `Deploy-VeeamProxies.README.md`.
 
 - No clear-text secrets stay on the deploy host. Settings and passwords are stored encrypted with
   a separate key; per-run copies are deleted when the run ends. The answer file exists in

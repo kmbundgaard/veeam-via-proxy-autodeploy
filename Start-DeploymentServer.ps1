@@ -231,6 +231,12 @@ function New-Run {
     $csvPath = Join-Path $dir 'proxies.csv'
     [System.IO.File]::WriteAllText($csvPath, (([string](Get-Field $Req 'csv')) -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
     $rows = @((Get-Content $csvPath | Where-Object { $_.Trim() })).Count - 1
+    # Software Appliance rows (role vbr / em): Stage A only - no VBR connection, product sizing from the script.
+    $vsa = [bool]@(Import-Csv $csvPath | Where-Object { ([string]$_.role).Trim().ToLowerInvariant() -in @('vbr', 'em') }).Count
+    if ($vsa) {
+        if ($mode -in @('RegisterOnly', 'IsoSingle', 'IsoPrompt')) { throw "Mode $mode does not apply to Software Appliance rows (vbr / em)." }
+        $needVbr = $false
+    }
 
     $q = { param($s) "'" + ([string]$s -replace "'", "''") + "'" }
     $a = [System.Collections.Generic.List[string]]::new()
@@ -267,11 +273,13 @@ function New-Run {
         } else { throw 'VBR user and password are required for this mode (the server cannot prompt).' }
         if ((Get-Field $Req 'vbrServer.mfaFile')) { if (([string](Get-Field $Req 'vbrServer.mfaFile')) -notmatch $SafeName) { throw 'Bad MFA file name.' }; $a.Add("-VBRMfaSecretFile $(& $q (Join-Path $SecretsDir (Get-Field $Req 'vbrServer.mfaFile')))") }
     }
-    if ((Get-Field $Req 'transportMode') -and (Get-Field $Req 'transportMode') -ne 'Auto') { if (([string](Get-Field $Req 'transportMode')) -notin @('HotAdd', 'Nbd', 'DirectStorageAccess')) { throw 'Bad transport mode.' }; $a.Add("-TransportMode $((Get-Field $Req 'transportMode'))") }
-    if ((Get-Field $Req 'applianceRole') -and (Get-Field $Req 'applianceRole') -ne 'InfrastructureServerIscsi') { if (([string](Get-Field $Req 'applianceRole')) -notin @('InfrastructureServer', 'None')) { throw 'Bad appliance role.' }; $a.Add("-ApplianceRole $((Get-Field $Req 'applianceRole'))") }
+    if (-not $vsa -and (Get-Field $Req 'transportMode') -and (Get-Field $Req 'transportMode') -ne 'Auto') { if (([string](Get-Field $Req 'transportMode')) -notin @('HotAdd', 'Nbd', 'DirectStorageAccess')) { throw 'Bad transport mode.' }; $a.Add("-TransportMode $((Get-Field $Req 'transportMode'))") }
+    if (-not $vsa -and (Get-Field $Req 'applianceRole') -and (Get-Field $Req 'applianceRole') -ne 'InfrastructureServerIscsi') { if (([string](Get-Field $Req 'applianceRole')) -notin @('InfrastructureServer', 'None')) { throw 'Bad appliance role.' }; $a.Add("-ApplianceRole $((Get-Field $Req 'applianceRole'))") }
     if ((Get-Field $Req 'rollbackOnFailure') -and $mode -in @('DeployOnly', 'Full')) { $a.Add('-RollbackOnFailure') }
     # VM sizing and disk layout from the planner's sizing panel (script defaults: 6 vCPU / 12 GB / 120 GB, one disk).
+    # It is the PROXY sizing: Software Appliance rows keep the script's per-product sizing (two disks of 240 GB+).
     $int = { param($k, [int]$min, [int]$max)
+        if ($vsa) { return 0 }
         $v = Get-Field $Req $k; if ($null -eq $v -or [string]$v -eq '') { return 0 }
         $n = 0; if (-not [int]::TryParse([string]$v, [ref]$n) -or $n -lt $min -or $n -gt $max) { throw "Bad value for $k (allowed $min-$max)." }; $n }
     $cpu = & $int 'vmCpu' 2 64;          if ($cpu -and $cpu -ne 6)    { $a.Add("-VmCpu $cpu") }
@@ -279,8 +287,8 @@ function New-Run {
     $dsk = & $int 'vmDiskGB' 120 4096;   if ($dsk -and $dsk -ne 120)  { $a.Add("-VmDiskGB $dsk") }
     $dat = & $int 'dataDiskGB' 0 65536
     if ($dat) { if ($dat -lt 120) { throw 'The extra data disk must be 120 GB or more (Veeam minimum for the data disk).' }; $a.Add('-MultiDisk'); $a.Add("-VmDataDiskGB $dat") }
-    if ((Get-Field $Req 'logsOnDataDisk')) { if (-not $dat) { throw 'Logs on disk 2 needs an extra data disk.' }; $a.Add('-LogsOnDataDisk') }
-    if ((Get-Field $Req 'replace') -and $mode -in @('Full', 'RegisterOnly', 'WhatIf')) {
+    if (-not $vsa -and (Get-Field $Req 'logsOnDataDisk')) { if (-not $dat) { throw 'Logs on disk 2 needs an extra data disk.' }; $a.Add('-LogsOnDataDisk') }
+    if (-not $vsa -and (Get-Field $Req 'replace') -and $mode -in @('Full', 'RegisterOnly', 'WhatIf')) {
         # Replace mode: capture job pinning -> remove old proxy/host -> (redeploy) -> register -> re-pin.
         $a.Add('-Replace')
         $pol = [string](Get-Field $Req 'replaceJobPolicy')

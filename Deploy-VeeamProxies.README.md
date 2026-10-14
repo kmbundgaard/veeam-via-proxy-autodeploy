@@ -136,14 +136,16 @@ public key, the project, the pwsh/xorriso RPMs and the PowerCLI modules; `New-De
 creates the VM, lets the install run, detaches the ISO and waits for SSH. Works offline once the
 Rocky ISO and the RPMs are on the laptop. The build machine needs PowerShell 7, PowerCLI and
 xorriso: native on Linux/macOS, or inside WSL on Windows (`-WslDistro <name>` when it is not the
-default distro; paths are translated automatically). The RPM folder must hold all six packages
-(powershell, xorriso, libisoburn, libisofs, libburn, libicu); the build lists what is missing.
+default distro; paths are translated automatically). The RPM folder must hold all seven packages
+(powershell, xorriso, libisoburn, libisofs, libburn, libicu, rsync); the build lists what is missing.
+Take rsync for the same Rocky minor as the ISO (9.8: `rsync-3.2.5-7.el9_8.2`); the kickstart installs it
+in its own step, so a mismatched build only costs rsync, not PowerShell.
 
 ```bash
-# once: Rocky 9 minimal ISO (https://rockylinux.org/download - verify against its CHECKSUM file) + six
+# once: Rocky 9 minimal ISO (https://rockylinux.org/download - verify against its CHECKSUM file) + seven
 #   RPMs into a folder: powershell-7.x-1.rh.x86_64.rpm (https://github.com/PowerShell/PowerShell/releases);
 #   xorriso, libisoburn, libisofs, libburn (https://dl.rockylinux.org/pub/rocky/9/AppStream/x86_64/os/Packages/);
-#   libicu (https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/Packages/l/). PowerCLI comes from the
+#   libicu + rsync (https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/Packages/l/ and .../r/). PowerCLI comes from the
 #   build host (or -PowerCliModulesDir = a Save-Module VCF.PowerCLI folder). PowerCLI and the appliance ISO
 #   are vendor-licensed: use the customer's own downloads when building for a customer.
 pwsh -File ./Build-DeployServerIso.ps1 -RockyIso ~/iso/Rocky-9.8-x86_64-minimal.iso -OutIso ~/iso/deploy-server.iso \
@@ -278,8 +280,9 @@ vbr02,prx-vbr02-01,10.10.2.11,255.255.255.0,10.10.2.1,10.10.2.53,CL-Prod02,DS-Ba
 | `vbr` | filter | Owning VBR key; `-Vbr` matches on this. |
 | `hostname` | A + B | **Unique across the network** (enforced). Becomes the kickstart `--hostname` and the VBR server name. |
 | `ip` `netmask` `gateway` `dns` | A | Static network for the kickstart line. `dns` may be comma-separated. |
+| `dnssearch` | A | *Optional.* DNS search domain(s) for NIC 1, `,`-separated (kickstart `--ipv4-dns-search`). Empty = none. |
 | `cluster` `datastore` `folder` `portgroup` | A | Pure vSphere placement; Veeam never sees these. |
-| `role` | B | `viproxy` = VMware Linux proxy. `gateway` = gateway server for deduplicating storage (see 2a). `viproxy+gateway` = both on one appliance. Anything else is refused at load. |
+| `role` | B | `viproxy` = VMware Linux proxy. `gateway` = gateway server for deduplicating storage (see 2a). `viproxy+gateway` = both on one appliance. `vbr` / `em` = a **Veeam Software Appliance**: a Backup & Replication server or Enterprise Manager, Stage A only (see 4e). Anything else is refused at load. |
 | `tasks` | B | Concurrent proxy task slots (`maxTaskCount` / `-MaxTasks`, 1-100). Leave empty on a `gateway`-only row. |
 | `gatewayrepo` | B | *Optional, gateway rows only.* Names of existing Dell Data Domain / HPE StoreOnce repositories, `;`-separated. The appliance is added to each one's gateway server list. REST path only. |
 | `handshakecode` | B | *Optional.* Pairing code for an appliance that was previously paired to a **different** VBR. Fresh appliances need none (`000000`). |
@@ -374,7 +377,7 @@ Things to check (from the Data Domain and StoreOnce pages of the user guide):
 | `-SkipDeploy` / `-SkipRegister` | off | Run only Stage B / only Stage A. |
 | `-IsoOnly` | off | Build the ISO(s) and a VM build sheet, then stop: no vCenter, no VBR (§4c). |
 | `-SingleIso` | off | With `-IsoOnly`: one ISO for all rows, the node is picked in the boot menu (§4c). |
-| `-PromptIso` | off | With `-IsoOnly`: one generic ISO that asks for hostname, NIC 1 and NIC 2 at install time; `-CsvPath` optional (first row = default netmask / gateway / DNS) (§4c). |
+| `-PromptIso` | off | With `-IsoOnly`: one generic ISO that asks for hostname, NIC 1 and NIC 2 at install time; `-CsvPath` optional (first row = default netmask / gateway / DNS / dnssearch) (§4c). |
 | `-IsoOutDir` | `<CSV dir>/iso-out` | Output of `-IsoOnly`. Must differ from `-IsoStagingDir`. |
 | `-ValidateOnly` | off | Offline checks: CSV, secrets rules, template rendering, and (with `-BaseIso`) a real extract + patch dry run into `<staging>/_validate_<host>/`. |
 | `-Rollback` / `-RollbackOnFailure` | off | Teardown all rows / auto-clean a failed row. |
@@ -559,7 +562,7 @@ ISO they contain the appliance passwords and MFA seeds in clear text: hand them 
 
 **Generic ISO, values typed at install (`-PromptIso`).** No node data in the ISO: after about a
 minute the installer stops on its own console and asks for the hostname (FQDN), NIC 1 IP, netmask,
-gateway and DNS, and - when the VM has a second adapter - NIC 2 IP and netmask (`-` = leave NIC 2
+gateway, DNS and DNS search domain(s) (default: the domain part of the hostname; `-` = none), and - when the VM has a second adapter - NIC 2 IP and netmask (`-` = leave NIC 2
 unconfigured). Enter keeps the value in [brackets] (defaults from the first CSV row when one is given).
 Every answer is checked, a summary is shown, and nothing installs until `y`; anything else starts over
 with the previous answers prefilled. One ISO serves any number of nodes; the person at the console is
@@ -574,8 +577,9 @@ pwsh -File ./Deploy-VeeamProxies.ps1 -CsvPath ./proxies.csv -Vbr vbr01 -IsoOnly 
 Verified in the lab on 2026-09-30: the single ISO (real xorriso repack, built on macOS) and the prompt
 ISO (built on macOS and on Windows with xorriso in WSL) boot with Secure Boot on; the menu entry or the
 typed values set hostname, NIC 1 and NIC 2; the settings file is applied (veeamadmin password and TOTP
-work); registration with `-SkipDeploy` and a backup job ran. A DNS search domain question was tried and
-removed: with `--ipv4-dns-search` the appliance's first-boot configuration was not applied.
+work); registration with `-SkipDeploy` and a backup job ran. The DNS search domain question
+(`--ipv4-dns-search`) was confirmed working on 2026-10-01 with the `prompt-search` test ISO; the
+first-boot failure first blamed on it (`prx-lab-04`, 2026-09-30) had another cause.
 
 ---
 
@@ -636,6 +640,57 @@ pwsh -File ./Deploy-VeeamProxies.ps1 -CsvPath ./proxies.csv -Vbr vbr01 -IsoOnly 
   -BaseIso ./VeeamInfrastructureAppliance_13.1.1.18_20260825.iso -ApplianceSecretsFile ./appliance-secrets-vbr01.conf \
   -MultiDisk -VmDataDiskGB 200 -LogsOnDataDisk
 ```
+
+## 4e. Veeam Software Appliance: backup server or Enterprise Manager (`role` = `vbr` / `em`)
+
+The same Stage A also deploys the **Veeam Software Appliance (VSA)**, the Linux appliance that runs
+the backup server itself. Set the row's `role` to:
+
+| `role` | Product | Kickstart on the ISO | Boot entry the build selects | Default VM |
+|---|---|---|---|---|
+| `vbr` | Veeam Backup & Replication | `/vbr-ks.cfg` | `Veeam Backup & Replication > Install - fresh install, wipes everything (including local backups)` | 8 vCPU / 16 GB, 240 + 240 GB |
+| `em` | Veeam Backup Enterprise Manager | `/vbem-ks.cfg` | `Veeam Backup Enterprise Manager > Install - fresh install, wipes everything` | 4 vCPU / 16 GB, 240 + 240 GB |
+
+How it differs from a proxy run:
+
+- **Base ISO** = `VeeamSoftwareAppliance_13.1.x.iso` (label `VeeamSA`). Both products come from that one
+  ISO. Unlike the 13.1 VIA, the **boot menu** picks the product, so no `applianceRole.*` keys are written.
+  The rest of the answer file (accounts, MFA, NTP), the static network line and `veeam-init.service` are
+  the same mechanism as on the VIA (Help Center "Automating Installation with Initial Configuration").
+- The stock grub default of the VSA ISO is the **Reinstall** entry. The build always sets the product's
+  **fresh install** entry and checks that both titles exist.
+- **Two disks are required** (system + data, at least 240 GB each). The VSA has no single-disk layout,
+  and the installer stops on a smaller or missing disk. `-VmCpu` / `-VmMemoryGB` / `-VmDiskGB` /
+  `-VmDataDiskGB` override the per-product sizing when you pass them. The backup server needs
+  +500 MB RAM per concurrent job on top of 16 GB.
+- **No Stage B.** These *are* the servers: there is nothing to register to a VBR. The run waits for the
+  Host Management Console (`:10443`) and then for the product on `:443` (VBR web UI + REST API, or the
+  Enterprise Manager web UI). The run report shows `register = n/a (software appliance)`.
+- Set **`VEEAMADMIN_MFA_ENABLED=true`** with a TOTP seed in the settings file. Without MFA, the appliance
+  keeps VBR / Enterprise Manager unavailable until veeamadmin enrols in the Host Management Console.
+  The run warns about this.
+- One run = one base ISO. `vbr` / `em` rows cannot share a `vbr` key with proxy rows; give them their
+  own key (for example `servers`) and run them with `-Vbr servers`. `vbr` and `em` rows may be mixed.
+- Works with: Full (deploy), `-WhatIf`, `-ValidateOnly`, `-IsoOnly` (one ISO per row), `-Rollback`
+  (deletes the VM; nothing to remove from a VBR), `-RollbackOnFailure`. Refused: `-SkipDeploy`,
+  `-Replace`, `-SingleIso`, `-PromptIso`, `-LogsOnDataDisk`, `-ApplianceRole`.
+
+```bash
+# servers.csv
+vbr,hostname,ip,netmask,gateway,dns,cluster,datastore,folder,portgroup,role,tasks
+servers,vbr01.corp.local,10.10.0.21,255.255.255.0,10.10.0.1,10.10.0.53,CL-Mgmt,DS-Mgmt01,Veeam,DPG-Mgmt,vbr,
+servers,em01.corp.local,10.10.0.20,255.255.255.0,10.10.0.1,10.10.0.53,CL-Mgmt,DS-Mgmt01,Veeam,DPG-Mgmt,em,
+
+pwsh -File ./Deploy-VeeamProxies.ps1 -CsvPath ./servers.csv -Vbr servers -ValidateOnly \
+  -BaseIso ./VeeamSoftwareAppliance_13.1.1.18_20260825.iso -ApplianceSecretsFile ./appliance-secrets-servers.conf
+pwsh -File ./Deploy-VeeamProxies.ps1 -CsvPath ./servers.csv -Vbr servers -vCenterServer vc01.corp.local \
+  -BaseIso ./VeeamSoftwareAppliance_13.1.1.18_20260825.iso -ApplianceSecretsFile ./appliance-secrets-servers.conf
+```
+
+Afterwards: log in as veeamadmin at `https://<ip>` (VBR web UI / Enterprise Manager) or
+`https://<ip>:10443` (Host Management). Add the backup servers to Enterprise Manager under
+**Configuration > Backup Servers** (a Linux VBR is added on port 443), and install licenses there.
+That step is not automated yet. Enterprise Manager has a REST call for it (`POST :9398/api/backupServers?action=create`).
 
 ---
 
@@ -765,7 +820,18 @@ CSV, or at `-ReportPath`. `-RollbackOnFailure` appends `(rolled back)` to a clea
 
 ---
 
-## 9. Status (2026-09-30)
+## 9. Status (2026-10-14)
+
+Added on 2026-10-14 (lab, release 1.3.0):
+
+- ✅ Software Appliance rows (`vbr` / `em`): the kickstart and grub patch was checked against the real
+  `VeeamSoftwareAppliance_13.1.1.18` ISO (`-ValidateOnly`, real xorriso), and `-WhatIf` passed against
+  vCenter (placement, sizing 8/16 and 4/16 + 2 × 240 GB).
+- ⏳ Full `vbr` / `em` install: blocked by the lab VPN (L2TP drops under large uploads). Next: run it from
+  the deployment server inside the lab.
+- ✅ Deployment server rebuilt from this release: Rocky 9.8, service active, key-only SSH, `rsync` installed
+  offline.
+
 
 Added on 2026-09-30 (lab, release 1.2.0):
 
@@ -774,7 +840,8 @@ Added on 2026-09-30 (lab, release 1.2.0):
 - ✅ Two disks with Veeam's standard layout; Veeam logs on disk 2 via the logs location (`prx-lab-05`).
 - ✅ ISO build on Windows (vone, xorriso in WSL) after the `wsl.exe --exec` path fix.
 - ⚠️ VBR *Export logs* does not collect a logs location on disk 2; the web UI support bundle does (§4d).
-- ❌ DNS search domain (`--ipv4-dns-search`) broke the first-boot configuration: removed.
+- ✅ DNS search domain (`--ipv4-dns-search`): prompt question and CSV column `dnssearch`; confirmed working
+  2026-10-01 with the `prompt-search` ISO (the 2026-09-30 suspicion was wrong).
 
 Added on 2026-09-25 (lab):
 

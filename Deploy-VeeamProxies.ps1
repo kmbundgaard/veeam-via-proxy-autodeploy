@@ -30,6 +30,11 @@
     the script processes only rows whose 'vbr' column matches (or pass -Vbr *  to process the
     whole CSV against a single connected VBR - not recommended for a multi-VBR CSV).
 
+    Veeam Software Appliance (VSA): CSV rows with role 'vbr' (Backup & Replication server) or 'em'
+    (Backup Enterprise Manager) run Stage A only, from the VeeamSoftwareAppliance_13.1.x ISO: per row
+    /vbr-ks.cfg or /vbem-ks.cfg + that product's fresh-install boot entry, two disks of 240 GB+, wait
+    for the Host Management Console and the product on :443. No Stage B (nothing to register).
+
     Dark-site friendly: no internet is used at runtime. PowerCLI, xorriso and the base ISO must be
     pre-staged (the PowerCLI auto-install only works on a connected host).
 
@@ -44,8 +49,13 @@
                        gateway server list (automatic selection off). REST path only for 'gatewayrepo'.
                        ExaGrid, Quantum DXi, ETERNUS CS800 and InfiniGuard use no gateway.
       viproxy+gateway  Both on the same appliance ('tasks' applies to the proxy).
-    Optional columns: vbrname, handshakecode, gatewayrepo, and ip2 + netmask2 + portgroup2 (a second
-    network adapter: static address, no gateway, no default route; all three together).
+      vbr              Veeam Software Appliance - Veeam Backup & Replication server (Stage A only).
+      em               Veeam Software Appliance - Veeam Backup Enterprise Manager (Stage A only).
+                       vbr / em need -BaseIso = the Software Appliance ISO, cannot be combined with another
+                       role and cannot share a run with proxy / gateway rows.
+    Optional columns: vbrname, handshakecode, gatewayrepo, dnssearch (DNS search domains, ','-separated),
+    and ip2 + netmask2 + portgroup2 (a second network adapter: static address, no gateway, no default
+    route; all three together).
 
 .PARAMETER Vbr
     The owning VBR key to process (matches the CSV 'vbr' column). Use '*' to process every row.
@@ -63,8 +73,9 @@
     Credential for vCenter. If omitted you'll be prompted (unless -SkipDeploy).
 
 .PARAMETER BaseIso
-    Path to the pristine, UNMODIFIED 13.1 Veeam INFRASTRUCTURE Appliance ISO (used by Stage A).
-    Per-node ISOs are repacked from it; the base is never edited in place.
+    Path to the pristine, UNMODIFIED 13.1 Veeam INFRASTRUCTURE Appliance ISO (used by Stage A), or the
+    Veeam SOFTWARE Appliance ISO for CSV rows with role vbr / em. Per-node ISOs are repacked from it;
+    the base is never edited in place.
 
 .PARAMETER ApplianceSecretsFile
     Protected key=value file with the SHARED appliance-account settings (veeamadmin/veeamso
@@ -146,12 +157,14 @@
 
 .PARAMETER PromptIso
     With -IsoOnly: ONE generic ISO with no node data in it. At install time the appliance stops on
-    a console screen and asks for the hostname and the settings of NIC 1 (IP, netmask, gateway, DNS)
-    and, when the VM has a second adapter, NIC 2 (IP, netmask; empty = unconfigured). Every answer
-    is checked, a summary is shown and the install only starts after "y". The appliance settings
+    a console screen and asks for the hostname and the settings of NIC 1 (IP, netmask, gateway, DNS,
+    DNS search domain) and, when the VM has a second adapter, NIC 2 (IP, netmask; empty =
+    unconfigured). Every answer is checked, a summary is shown and the install only starts after
+    "y". The appliance settings
     file (passwords, MFA, NTP, role), -MultiDisk and -LogsOnDataDisk are built in as usual.
     -CsvPath is optional here: when given, its first row supplies the default netmask, gateway,
-    DNS and netmask2 shown in the questions. Register afterwards with a CSV of what was typed and
+    DNS, dnssearch and netmask2 shown in the questions (the search domain defaults to the domain
+    part of the typed hostname; '-' = none). Register afterwards with a CSV of what was typed and
     -SkipDeploy.
 
 .PARAMETER IsoOutDir
@@ -403,6 +416,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Parameters the operator actually passed: VSA rows use their product's sizing for the -Vm* values
+# that were NOT given (Get-RowVmSize).
+$script:BoundParams = @{} + $PSBoundParameters
 
 # Host OS (StrictMode-safe: $IsWindows is undefined on Windows PowerShell 5.1).
 $script:IsWindowsHost = if ($PSVersionTable.PSVersion.Major -lt 6) { $true } else { $IsWindows }
@@ -1093,22 +1109,89 @@ $script:GatewayRepoPaths = @{ DellDataDomain = 'dellDataDomain.gatewayServer'; H
 
 function Get-RowRoles {
     # CSV 'role': viproxy | gateway | viproxy+gateway (order, case and spaces ignored). Empty = add the
-    # managed server only. Unknown tokens are returned so the CSV load can refuse them.
+    # managed server only. vbr / em = a Veeam Software Appliance (backup server / Enterprise Manager),
+    # never combined with anything. Unknown tokens are returned so the CSV load can refuse them.
     param($Row)
     $parts = @(([string]$Row.role).ToLowerInvariant() -split '[+;, ]+' | Where-Object { $_ })
     [pscustomobject]@{
         Proxy   = $parts -contains 'viproxy'
         Gateway = $parts -contains 'gateway'
-        Unknown = @($parts | Where-Object { $_ -notin @('viproxy', 'gateway') })
+        Vbr     = $parts -contains 'vbr'
+        Em      = $parts -contains 'em'
+        Count   = $parts.Count
+        Unknown = @($parts | Where-Object { $_ -notin @('viproxy', 'gateway', 'vbr', 'em') })
     }
 }
 
 function Get-RoleLabel {
     param($Row)
+    $p = Get-RowVsaProduct -Row $Row
+    if ($p) { return $p.Label }
     $r = Get-RowRoles -Row $Row
     if ($r.Proxy -and $r.Gateway) { return 'VIA proxy+gateway' }
     if ($r.Gateway) { return 'VIA gateway' }
     return 'VIA proxy'
+}
+
+# Veeam Software Appliance (VSA) rows - CSV role 'vbr' or 'em'. Both products come from the SAME
+# VeeamSoftwareAppliance_13.1.x ISO (volume label VeeamSA); unlike the 13.1 VIA, the product is picked
+# by the BOOT MENU: one kickstart and one submenu per product. Kickstart names and entry titles read
+# from VeeamSoftwareAppliance_13.1.1.18_20260825.iso. The stock grub default of that ISO is the VBR
+# *Reinstall* entry - the build always sets the product's fresh-install entry instead.
+# Both kickstarts use the same disk layout (vbr_server_disk_layout.json): disk 1 (system) AND disk 2
+# (data) of at least 240 GB each - the installer stops on a smaller or missing disk.
+# Sizing (Help Center, ver=13): backup server 8 vCPU / 16 GB (+500 MB per concurrent job); Enterprise
+# Manager 2 vCPU / 6 GB minimum, 4 vCPU / 16 GB recommended. Readiness port: 443 for both (13.x moved
+# the VBR REST API to 443 next to the web UI; 9419 is kept for Swagger / backward compatibility).
+$script:VsaMinDiskGB = 240
+$script:VsaProducts = @{
+    vbr = [pscustomobject]@{
+        Key = 'vbr'; Label = 'VSA Backup & Replication'; Kickstart = 'vbr-ks.cfg'
+        Grub = 'Veeam Backup & Replication>Install - fresh install, wipes everything (including local backups)'
+        Cpu = 8; MemoryGB = 16; DiskGB = 240; DataDiskGB = 240
+        ServicePort = 443; ServiceName = 'VBR web UI / REST API'
+    }
+    em  = [pscustomobject]@{
+        Key = 'em'; Label = 'VSA Enterprise Manager'; Kickstart = 'vbem-ks.cfg'
+        Grub = 'Veeam Backup Enterprise Manager>Install - fresh install, wipes everything'
+        Cpu = 4; MemoryGB = 16; DiskGB = 240; DataDiskGB = 240
+        ServicePort = 443; ServiceName = 'Enterprise Manager web UI'
+    }
+}
+
+function Get-RowVsaProduct {
+    # The VSA product of a row ($null for a VIA row).
+    param($Row)
+    $r = Get-RowRoles -Row $Row
+    if ($r.Vbr) { return $script:VsaProducts.vbr }
+    if ($r.Em)  { return $script:VsaProducts.em }
+    return $null
+}
+
+function Get-RowKickstart {
+    # Kickstart inside the base ISO for this row: per product on the VSA, -KickstartName on the VIA.
+    param($Row)
+    $p = Get-RowVsaProduct -Row $Row
+    if ($p) { return $p.Kickstart }
+    return $KickstartName
+}
+
+function Get-RowVmSize {
+    # VM hardware for a row. VIA rows: the -Vm* parameters as given. VSA rows: the product's sizing
+    # unless the operator passed the parameter, always two disks (the VSA has no single-disk layout).
+    param($Row)
+    $p = Get-RowVsaProduct -Row $Row
+    if (-not $p) {
+        return [pscustomobject]@{ Cpu = $VmCpu; MemoryGB = $VmMemoryGB; DiskGB = $VmDiskGB; MultiDisk = [bool]$MultiDisk; DataDiskGB = $VmDataDiskGB }
+    }
+    $pick = { param($name, $def) if ($script:BoundParams.ContainsKey($name)) { $script:BoundParams[$name] } else { $def } }
+    [pscustomobject]@{
+        Cpu        = & $pick 'VmCpu' $p.Cpu
+        MemoryGB   = & $pick 'VmMemoryGB' $p.MemoryGB
+        DiskGB     = & $pick 'VmDiskGB' $p.DiskGB
+        MultiDisk  = $true
+        DataDiskGB = & $pick 'VmDataDiskGB' $p.DataDiskGB
+    }
 }
 
 function Get-GatewayRepoNames {
@@ -1445,7 +1528,10 @@ function Import-DeploymentCsv {
         [ipaddress]$null = $r.ip   # throws if not a valid IP
         $roles = Get-RowRoles -Row $r
         if ($roles.Unknown.Count) {
-            throw "Row '$($r.hostname)': role '$($r.role)' is not valid. Use viproxy, gateway or viproxy+gateway."
+            throw "Row '$($r.hostname)': role '$($r.role)' is not valid. Use viproxy, gateway or viproxy+gateway (Infrastructure Appliance), or vbr / em (Software Appliance: Backup & Replication / Enterprise Manager)."
+        }
+        if (($roles.Vbr -or $roles.Em) -and $roles.Count -ne 1) {
+            throw "Row '$($r.hostname)': role '$($r.role)' - vbr and em are whole appliances (Veeam Software Appliance) and cannot be combined with another role."
         }
         if (@(Get-GatewayRepoNames -Row $r).Count -and -not $roles.Gateway) {
             throw "Row '$($r.hostname)': 'gatewayrepo' is set but the role '$($r.role)' has no gateway. Use role gateway or viproxy+gateway."
@@ -1463,6 +1549,11 @@ function Import-DeploymentCsv {
             throw ("Duplicate ip '{0}' in CSV (rows '{1}' and '{2}') - every appliance needs its own address." -f $r.ip, $seen[$ipKey], $r.hostname)
         }
         if ($r.ip) { $seen[$ipKey] = $r.hostname }
+        if ($r.PSObject.Properties['dnssearch'] -and $r.dnssearch) {
+            foreach ($d in (([string]$r.dnssearch) -split '[,; ]+' | Where-Object { $_ })) {
+                if ($d -notmatch '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$') { throw "Row '$($r.hostname)': dnssearch '$d' is not a valid domain name." }
+            }
+        }
         # Optional second NIC (ip2 / netmask2 / portgroup2 as a set): its address must be unique as well.
         $nic2 = Get-RowNic2 -Row $r
         if ($nic2) {
@@ -1475,6 +1566,13 @@ function Import-DeploymentCsv {
             }
             $seen[$ip2Key] = $r.hostname
         }
+    }
+
+    # One run = one base ISO: Infrastructure Appliance rows and Software Appliance rows need different ISOs.
+    $vsaRows = @($rows | Where-Object { Get-RowVsaProduct -Row $_ })
+    if ($vsaRows.Count -and $vsaRows.Count -ne @($rows).Count) {
+        throw ("The selected rows mix Software Appliance roles (vbr / em: {0}) with Infrastructure Appliance roles - they are built from different ISOs. " +
+               "Put them in separate CSVs or give them different 'vbr' values and run each with -Vbr.") -f (($vsaRows.hostname) -join ', ')
     }
 
     Write-Log "Loaded $($rows.Count) row(s) for vbr '$VbrFilter'." 'OK'
@@ -1923,9 +2021,11 @@ function Get-GrubInstallEntry {
     # The stock "fresh install" entry for the chosen disk layout (-MultiDisk / -GrubDefaultEntry),
     # asserted against the titles in grub.cfg so a renamed menu fails the build instead of dropping
     # the VM into an interactive installer. Returns the titles and the entry's kernel + initrd lines.
-    param([Parameter(Mandatory)][string]$GrubText)
-    if ($GrubDefaultEntry) {
-        # Explicit override (e.g. a 13.0.x ISO); still asserted against the real titles below.
+    param([Parameter(Mandatory)][string]$GrubText, $Row)
+    $vsa = if ($Row) { Get-RowVsaProduct -Row $Row } else { $null }
+    if ($GrubDefaultEntry -or $vsa) {
+        # Explicit override (e.g. a 13.0.x ISO) or the VSA product's fresh-install entry.
+        if (-not $GrubDefaultEntry) { $GrubDefaultEntry = $vsa.Grub }
         $parts   = $GrubDefaultEntry -split '>'
         $submenu = $parts[0].Trim(); $leaf = $parts[-1].Trim()
         $default = $GrubDefaultEntry
@@ -1938,7 +2038,8 @@ function Get-GrubInstallEntry {
     $titles = @([regex]::Matches($GrubText, "(?m)^[ \t]*(?:menuentry|submenu)[ \t]+(['`"])(.+?)\1") | ForEach-Object { $_.Groups[2].Value })
     foreach ($needed in @($submenu, $leaf)) {
         if ($titles -notcontains $needed) {
-            throw "grub.cfg has no menu title '$needed'. Titles found: $(($titles | Sort-Object -Unique) -join ' | '). Toggle -MultiDisk or update the expected titles for this ISO build."
+            $hint = if ($vsa) { "Is -BaseIso the Veeam SOFTWARE Appliance ISO (VeeamSoftwareAppliance_13.1.x)?" } else { 'Toggle -MultiDisk or update the expected titles for this ISO build.' }
+            throw "grub.cfg has no menu title '$needed'. Titles found: $(($titles | Sort-Object -Unique) -join ' | '). $hint"
         }
     }
     $body = [regex]::Match($GrubText, "(?ms)^[ \t]*menuentry[ \t]+(['`"])" + [regex]::Escape($leaf) + "\1[^\n{]*\{\n(.*?)^[ \t]*\}")
@@ -1963,6 +2064,8 @@ function Get-PatchedApplianceConfigs {
         [Parameter(Mandatory)]$SharedArtifacts
     )
     if (-not (Test-Path -LiteralPath $Scratch -PathType Container)) { New-Item -ItemType Directory -Path $Scratch -Force -WhatIf:$false | Out-Null }
+    # VSA rows: /vbr-ks.cfg or /vbem-ks.cfg from the Software Appliance ISO; VIA rows: -KickstartName.
+    $KickstartName = Get-RowKickstart -Row $Row
     $exKs   = Join-Path $Scratch $KickstartName
     $exGrub = Join-Path $Scratch 'grub.cfg'
 
@@ -1971,6 +2074,7 @@ function Get-PatchedApplianceConfigs {
         '-extract', "/$KickstartName", (Convert-ToolPath $exKs),
         '-extract', '/EFI/BOOT/grub.cfg', (Convert-ToolPath $exGrub))
     if (-not (Test-Path $exKs) -or -not (Test-Path $exGrub)) {
+        if (Get-RowVsaProduct -Row $Row) { throw "Could not extract /$KickstartName and /EFI/BOOT/grub.cfg from '$BaseIso'. CSV role '$($Row.role)' needs the Veeam SOFTWARE Appliance ISO (VeeamSoftwareAppliance_13.1.x: /vbr-ks.cfg + /vbem-ks.cfg), not the Infrastructure Appliance ISO." }
         throw "Could not extract /$KickstartName and /EFI/BOOT/grub.cfg from '$BaseIso'. List the ISO root with 'xorriso -indev <iso> -find / -maxdepth 1': 13.1 ships /proxy-ks.cfg, 13.0.x shipped /vmware-proxy-ks.cfg (pass -KickstartName)."
     }
 
@@ -1984,6 +2088,9 @@ function Get-PatchedApplianceConfigs {
     $netLine = ($netLine -split "`n" | Where-Object { $_.Trim() -and -not $_.TrimStart().StartsWith('#') } | Select-Object -First 1)
     if (-not $netLine) { throw "network-line.template produced no active network line." }
     $netLine = $netLine.Trim()
+    # Optional CSV column dnssearch (search domains, ',' or ';'-separated) -> anaconda --ipv4-dns-search.
+    $srch = if (-not $prompt -and $Row.PSObject.Properties['dnssearch']) { (([string]$Row.dnssearch) -split '[,; ]+' | Where-Object { $_ }) -join ',' } else { '' }
+    if ($srch) { $netLine += " --ipv4-dns-search=$srch" }
 
     $ksText = (Get-Content -Raw $exKs) -replace "`r`n", "`n"
     $rxNet = [regex]'(?m)^[ \t]*network[ \t]+--bootproto=\S+.*$'
@@ -1996,9 +2103,9 @@ function Get-PatchedApplianceConfigs {
         if ($nCat -ne 1) { throw "Expected exactly one 'cat <<EOF > /tmp/pre-network.cfg' in /$KickstartName (found $nCat) - the VIA kickstart layout changed; inspect $exKs." }
         $d = $Row._defaults
         $ask = ConvertTo-RenderedTemplate -TemplatePath (Join-Path $SharedArtifacts.TemplateDir 'prompt-network.sh.template') -Tokens @{
-            DEF_MASK = $d.netmask; DEF_GW = $d.gateway; DEF_DNS = $d.dns; DEF_MASK2 = $d.netmask2 }
+            DEF_MASK = $d.netmask; DEF_GW = $d.gateway; DEF_DNS = $d.dns; DEF_SEARCH = $d.dnssearch; DEF_MASK2 = $d.netmask2 }
         $ask = ($ask -replace "`r`n", "`n").TrimEnd("`n") + "`n"
-        $netLine = $netLine.Replace('--bootproto=static', '--bootproto=static --device=${VAD_NIC1}') + "`n" + '${VAD_NET2}'
+        $netLine = $netLine.Replace('--bootproto=static', '--bootproto=static --device=${VAD_NIC1}') + ' ${VAD_SRCH_OPT}' + "`n" + '${VAD_NET2}'
         $ksText = $rxCat.Replace($ksText, { param($m) $ask + $m.Value }, 1)
     }
     elseif ($nic2) {
@@ -2083,7 +2190,7 @@ echo "veeam-autodeploy: NIC1=${VAD_NIC1} NIC2=${VAD_NIC2}"
     #    kickstart. Assert the expected submenu/entry titles exist so a renamed menu fails the
     #    build here instead of dropping the VM into an interactive installer.
     $grubText = (Get-Content -Raw $exGrub) -replace "`r`n", "`n"
-    $ie = Get-GrubInstallEntry -GrubText $grubText
+    $ie = Get-GrubInstallEntry -GrubText $grubText -Row $Row
     $defaultEntry = $ie.Default
     if ($grubText -match '(?m)^\s*set\s+timeout=') { $grubText = [regex]::Replace($grubText, '(?m)^\s*set\s+timeout=.*$', "set timeout=$GrubTimeout") }
     else { $grubText = "set timeout=$GrubTimeout`n" + $grubText }
@@ -2097,6 +2204,7 @@ echo "veeam-autodeploy: NIC1=${VAD_NIC1} NIC2=${VAD_NIC2}"
 
     return [pscustomobject]@{
         Kickstart   = $exKs
+        KsName      = $KickstartName
         Grub        = $exGrub
         Anchor      = $used
         GrubDefault = $defaultEntry
@@ -2139,11 +2247,11 @@ function New-ApplianceIso {
     if (Test-Path $scratch) { Remove-Item $scratch -Recurse -Force }
     try {
         $cfg = Get-PatchedApplianceConfigs -Row $Row -BaseIso $BaseIso -Scratch $scratch -SharedArtifacts $SharedArtifacts
-        Write-Log "Patched /$KickstartName (static network + init block after '$($cfg.Anchor)') and grub (default '$($cfg.GrubDefault)', inst.assumeyes on $($cfg.KernelLines) kernel line(s))." 'INFO'
+        Write-Log "Patched /$($cfg.KsName) (static network + init block after '$($cfg.Anchor)') and grub (default '$($cfg.GrubDefault)', inst.assumeyes on $($cfg.KernelLines) kernel line(s))." 'INFO'
 
         Copy-Item -LiteralPath $BaseIso -Destination $target -Force
         $xa = @('-dev', (Convert-ToolPath $target), '-boot_image', 'any', 'replay',
-            '-rm', "/$KickstartName", '--', '-map', (Convert-ToolPath $cfg.Kickstart), "/$KickstartName",
+            '-rm', "/$($cfg.KsName)", '--', '-map', (Convert-ToolPath $cfg.Kickstart), "/$($cfg.KsName)",
             '-rm', '/EFI/BOOT/grub.cfg', '--', '-map', (Convert-ToolPath $cfg.Grub), '/EFI/BOOT/grub.cfg')
         Invoke-Xorriso -Arguments ($xa + '-commit')
 
@@ -2275,15 +2383,20 @@ function Write-IsoVmSpec {
         [switch]$Single,
         [switch]$Prompt                             # -PromptIso: generic ISO, values typed at install time
     )
-    $disk2 = if ($MultiDisk) { "; disk 2 = $VmDataDiskGB GB thin (data$(if ($LogsOnDataDisk) { "; Veeam logs go to $script:VeeamLogsDataDir" }))" } else { '' }
-    $sb    = if ($NoSecureBoot) { 'OFF (-NoSecureBoot was given: troubleshooting only)' } else { 'ON (required by Veeam for the VIA)' }
+    $vsaSpec = [bool]@($Items | Where-Object { Get-RowVsaProduct -Row $_.Row }).Count
+    $sizes = @($Items | ForEach-Object { Get-RowVmSize -Row $_.Row })
+    $sz0   = if ($sizes.Count) { $sizes[0] } else { Get-RowVmSize -Row ([pscustomobject]@{ role = '' }) }
+    $mixed = @($sizes | ForEach-Object { "$($_.Cpu)/$($_.MemoryGB)/$($_.DiskGB)/$($_.MultiDisk)/$($_.DataDiskGB)" } | Sort-Object -Unique).Count -gt 1
+    $disk2 = if ($sz0.MultiDisk) { "; disk 2 = $($sz0.DataDiskGB) GB thin (data$(if ($LogsOnDataDisk) { "; Veeam logs go to $script:VeeamLogsDataDir" }))" } else { '' }
+    $sb    = if ($NoSecureBoot) { 'OFF (-NoSecureBoot was given: troubleshooting only)' } else { "ON$(if (-not $vsaSpec) { ' (required by Veeam for the VIA)' })" }
     $anyNic2 = $Prompt -or [bool]@($Items | Where-Object { Get-RowNic2 -Row $_.Row }).Count
     $table = @($Items | ForEach-Object {
         $n2 = Get-RowNic2 -Row $_.Row
+        $sz = Get-RowVmSize -Row $_.Row
         [pscustomobject][ordered]@{
             vm_name = $_.Row.hostname; ip = $_.Row.ip; ip2 = $(if ($n2) { $n2.Ip } else { '' }); iso = (Split-Path $_.Iso -Leaf); boot_entry = $_.Boot
             cluster = $_.Row.cluster; datastore = $_.Row.datastore; folder = $_.Row.folder; portgroup = $_.Row.portgroup; portgroup2 = $(if ($n2) { $n2.PortGroup } else { '' })
-            vcpu = $VmCpu; memory_gb = $VmMemoryGB; disk1_gb = $VmDiskGB; disk2_gb = $(if ($MultiDisk) { $VmDataDiskGB } else { '' })
+            role = $_.Row.role; vcpu = $sz.Cpu; memory_gb = $sz.MemoryGB; disk1_gb = $sz.DiskGB; disk2_gb = $(if ($sz.MultiDisk) { $sz.DataDiskGB } else { '' })
         }
     })
     $netLines = if ($anyNic2) {
@@ -2291,12 +2404,13 @@ function Write-IsoVmSpec {
           '                rows with ip2: adapter 2 (VMXNET3) = NIC 2 on column portgroup2 (static address, no gateway).',
           '                Adapter ORDER matters: the installer takes the first PCI device as NIC 1, the second as NIC 2.')
     } else { @('  Network       1 adapter on the port group in the table') }
-    $cols = @('vm_name', 'ip') + $(if ($anyNic2) { @('ip2') } else { @() }) + @('boot_entry', 'iso', 'cluster', 'datastore', 'folder', 'portgroup') + $(if ($anyNic2) { @('portgroup2') } else { @() })
+    $cols = @('vm_name', 'ip') + $(if ($anyNic2) { @('ip2') } else { @() }) + @('boot_entry', 'iso', 'cluster', 'datastore', 'folder', 'portgroup') + $(if ($anyNic2) { @('portgroup2') } else { @() }) +
+            $(if ($mixed) { @('role', 'vcpu', 'memory_gb', 'disk1_gb', 'disk2_gb') } else { @() })
     $csv = Join-Path $OutDir "$BaseName-VM-SPEC.csv"
     if ($table.Count) { $table | Export-Csv -Path $csv -NoTypeInformation }
     $boot = if ($Prompt) {
         @("3. Attach the ISO and power on. After about a minute the console stops on 'AutoDeploy' and asks for:",
-          "   hostname (FQDN), NIC 1 IP / netmask / gateway / DNS, and - when the VM has a 2nd adapter - NIC 2 IP / netmask",
+          "   hostname (FQDN), NIC 1 IP / netmask / gateway / DNS / search domain, and - when the VM has a 2nd adapter - NIC 2 IP / netmask",
           "   (type - to leave NIC 2 unconfigured). It shows a summary; type y to install, anything else to start over.",
           "   Nothing installs until y. Every VM gets its own name and addresses: never type another VM's values.")
     }
@@ -2312,8 +2426,8 @@ function Write-IsoVmSpec {
         ''
         'Every VM:'
         "  Guest OS      Red Hat Enterprise Linux 9 (64-bit)  [$GuestId]"
-        "  CPU / RAM     $VmCpu vCPU / $VmMemoryGB GB"
-        "  Disks         disk 1 = $VmDiskGB GB thin (system)$disk2"
+        $(if ($mixed) { '  CPU / RAM     per VM - see the columns vcpu / memory_gb in the table' } else { "  CPU / RAM     $($sz0.Cpu) vCPU / $($sz0.MemoryGB) GB" })
+        $(if ($mixed) { '  Disks         per VM - see disk1_gb / disk2_gb (thin; disk 1 = system, disk 2 = data)' } else { "  Disks         disk 1 = $($sz0.DiskGB) GB thin (system)$disk2" })
         $netLines
         "  Firmware      EFI, Secure Boot $sb"
         '  Advanced      disk.EnableUUID = TRUE   (VBR matches the proxy VM to the managed server)'
@@ -2326,8 +2440,13 @@ function Write-IsoVmSpec {
         '4. Install + first-boot configuration take about 25 minutes. Done when https://<ip>:10443 (Host Management Console) answers.'
         '5. Disconnect the CD drive, then delete the ISO from the datastore and from the build folder:'
         '   it contains the appliance passwords and MFA seeds in clear text.'
-        '6. Register to VBR (needs VBR access only, no vCenter):'
-        '   Deploy-VeeamProxies.ps1 -CsvPath <same csv> -Vbr <vbr> -VBRServer <vbr fqdn> -SkipDeploy'
+        $(if ($vsaSpec) {
+            @('6. Software Appliance: done when https://<ip> answers too (Backup & Replication web UI / Enterprise Manager). Log in as veeamadmin.',
+              '   Enterprise Manager: add the backup servers under Configuration > Backup Servers.')
+        } else {
+            @('6. Register to VBR (needs VBR access only, no vCenter):',
+              '   Deploy-VeeamProxies.ps1 -CsvPath <same csv> -Vbr <vbr> -VBRServer <vbr fqdn> -SkipDeploy')
+        })
         ''
         $(if ($table.Count) { ($table | Format-Table -Property $cols -AutoSize | Out-String -Width 400).TrimEnd() } else { '(no CSV given: take hostname and addresses from your own plan)' })
     )
@@ -2394,6 +2513,31 @@ function Wait-ApplianceReady {
            "installer or a boot error, check the ISO/kickstart. See the README troubleshooting table.") -f $Row.hostname, $TimeoutSec, $HmcPort)
 }
 
+function Wait-VsaService {
+    # VSA rows, after the Host Management Console answers: the product's own endpoint (TCP 443: VBR web
+    # UI + REST API, or the Enterprise Manager web UI) must answer too before the row counts as deployed.
+    param(
+        [Parameter(Mandatory)]$Row,
+        [Parameter(Mandatory)]$Product,
+        [int]$TimeoutSec = 1800,
+        [int]$PollSec = 20,
+        [int]$RequiredConsecutive = 3
+    )
+    Write-Log "Waiting for the $($Product.ServiceName) on $($Row.ip):$($Product.ServicePort)..." 'STEP'
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $hits = 0
+    while ((Get-Date) -lt $deadline) {
+        if (Test-TcpPort -TargetHost $Row.ip -Port $Product.ServicePort -TimeoutMs 3000) {
+            $hits++
+            if ($hits -ge $RequiredConsecutive) { Write-Log "'$($Row.hostname)': $($Product.ServiceName) answers on :$($Product.ServicePort)." 'OK'; return $true }
+        }
+        else { $hits = 0 }
+        Start-Sleep -Seconds $PollSec
+    }
+    throw ("'{0}': the Host Management Console is up but the {1} did not answer on :{2} within {3}s. Log in to https://{4}:10443 as veeamadmin and check the appliance status." -f
+           $Row.hostname, $Product.ServiceName, $Product.ServicePort, $TimeoutSec, $Row.ip)
+}
+
 function Resolve-IsoDatastore {
     # New-CDDrive needs a concrete DATASTORE (not an SDRS cluster). Prefer -IsoDatastore; else the
     # row's datastore; if that is a datastore cluster, pick its member with the most free space.
@@ -2406,6 +2550,8 @@ function Resolve-IsoDatastore {
     throw "Resolve-IsoDatastore: '$($Row.datastore)' is neither a datastore nor a datastore cluster."
 }
 
+$script:UploadAttempts = 3
+$script:UploadRetrySec  = 30
 function Copy-IsoToDatastore {
     param([Parameter(Mandatory)][string]$IsoPath, [Parameter(Mandatory)]$Datastore, [string]$FolderName = 'iso')
     $name  = Split-Path $IsoPath -Leaf
@@ -2414,7 +2560,16 @@ function Copy-IsoToDatastore {
     try {
         $dstDir = "${drive}:\$FolderName"
         if (-not (Test-Path $dstDir)) { New-Item -ItemType Directory -Path $dstDir | Out-Null }
-        Copy-DatastoreItem -Item $IsoPath -Destination "$dstDir\$name" -Force
+        # A datastore upload cannot resume: a dropped link (VPN, lab 2026-10-14: "Broken pipe" on a 15 GB VSA
+        # ISO) restarts it from zero. Retry a few times before the row fails.
+        for ($try = 1; ; $try++) {
+            try { Copy-DatastoreItem -Item $IsoPath -Destination "$dstDir\$name" -Force; break }
+            catch {
+                if ($try -ge $script:UploadAttempts) { throw }
+                Write-Log ("Upload of {0} failed (attempt {1}/{2}): {3} - retrying in {4}s." -f $name, $try, $script:UploadAttempts, $_.Exception.Message, $script:UploadRetrySec) 'WARN'
+                Start-Sleep -Seconds $script:UploadRetrySec
+            }
+        }
     }
     finally { Remove-PSDrive -Name $drive -ErrorAction SilentlyContinue }
     return ("[{0}] {1}/{2}" -f $Datastore.Name, $FolderName, $name)
@@ -2553,7 +2708,9 @@ function Invoke-StageA-Deploy {
         Write-Log "Uploaded ISO to $isoDsPath." 'OK'
     }
 
-    if ($PSCmdlet.ShouldProcess($Row.hostname, "New-VM (UEFI $VmCpu vCPU/$VmMemoryGB GB/$VmDiskGB GB thin) + attach ISO + power on")) {
+    $size = Get-RowVmSize -Row $Row
+    $vsa  = Get-RowVsaProduct -Row $Row
+    if ($PSCmdlet.ShouldProcess($Row.hostname, "New-VM (UEFI $($size.Cpu) vCPU/$($size.MemoryGB) GB/$($size.DiskGB) GB thin$(if ($size.MultiDisk) { " + $($size.DataDiskGB) GB" })) + attach ISO + power on")) {
         # Standard port groups exist per host, so resolve on the host the VM lands on (a multi-host
         # cluster otherwise hands New-VM another host's port group); distributed ones need the Vds module.
         $pg = Get-PortGroupByName -Name $Row.portgroup -VMHost $vmhost
@@ -2572,10 +2729,10 @@ function Invoke-StageA-Deploy {
             Name              = $Row.hostname
             VMHost            = $vmhost
             Datastore         = $storage
-            DiskGB            = $VmDiskGB
+            DiskGB            = $size.DiskGB
             DiskStorageFormat = 'Thin'
-            MemoryGB          = $VmMemoryGB
-            NumCpu            = $VmCpu
+            MemoryGB          = $size.MemoryGB
+            NumCpu            = $size.Cpu
             GuestId           = $GuestId
             Portgroup         = $pg
             CD                = $true
@@ -2604,9 +2761,9 @@ function Invoke-StageA-Deploy {
             Write-Log "Added network adapter 2 on '$($nic2.PortGroup)' = NIC 2 ($($nic2.Ip)/$($nic2.Netmask), no gateway)." 'INFO'
         }
 
-        if ($MultiDisk) {
-            New-HardDisk -VM $vm -CapacityGB $VmDataDiskGB -StorageFormat Thin -Confirm:$false | Out-Null
-            Write-Log "Added $VmDataDiskGB GB thin data disk (multi-disk deployment)." 'INFO'
+        if ($size.MultiDisk) {
+            New-HardDisk -VM $vm -CapacityGB $size.DataDiskGB -StorageFormat Thin -Confirm:$false | Out-Null
+            Write-Log "Added $($size.DataDiskGB) GB thin data disk ($(if ($vsa) { 'VSA disk 2' } else { 'multi-disk deployment' }))." 'INFO'
         }
 
         # Attach the per-node ISO to the CD drive New-VM created (-CD) and boot it.
@@ -2619,6 +2776,8 @@ function Invoke-StageA-Deploy {
         # VM console as a PNG next to the staging area BEFORE any rollback removes the evidence.
         try {
             Wait-ApplianceReady -Row $Row -Vm $vm -HmcPort $HmcPort -TimeoutSec $IsoReadyTimeoutSec -PollSec $IsoReadyPollSec | Out-Null
+            # VSA: the product installs its services after the console is up - wait for its own port too.
+            if ($vsa) { Wait-VsaService -Row $Row -Product $vsa -TimeoutSec $IsoReadyTimeoutSec -PollSec $IsoReadyPollSec | Out-Null }
         }
         catch {
             $shotPath = Save-VmConsoleScreenshot -Vm (Get-VM -Name $Row.hostname -ErrorAction SilentlyContinue) -OutDir (Split-Path -Parent $IsoPath) -Name $Row.hostname
@@ -2768,6 +2927,27 @@ try {
         throw "-IsoOnly only builds ISOs; it cannot be combined with -SkipDeploy, -ValidateOnly, -Rollback or -Replace."
     }
 
+    # --- Software Appliance run (CSV role vbr / em): same Stage A, product picked per row, no Stage B ---
+    $script:VsaRun = [bool]($rows.Count -and (Get-RowVsaProduct -Row $rows[0]))
+    if ($script:VsaRun) {
+        if ($SkipDeploy -and -not $Rollback) { throw "CSV roles vbr / em are Software Appliances: there is nothing to register to a VBR, so -SkipDeploy leaves nothing to do." }
+        if ($Replace)   { throw "-Replace re-homes a PROXY inside its VBR; it does not apply to Software Appliance rows (vbr / em). Use -Rollback, then a normal run." }
+        if ($SingleIso -or $PromptIso) { throw "-SingleIso / -PromptIso are built for Infrastructure Appliance rows only. For vbr / em rows use -IsoOnly (one ISO per row)." }
+        if ($LogsOnDataDisk) { throw "-LogsOnDataDisk is for the Infrastructure Appliance; the Software Appliance already puts /var/log on disk 2." }
+        if ($script:BoundParams.ContainsKey('ApplianceRole') -and $ApplianceRole -ne 'None') { throw "-ApplianceRole is an Infrastructure Appliance setting; the Software Appliance product comes from the CSV role (vbr / em)." }
+        $ApplianceRole = 'None'      # no applianceRole.* keys: the boot entry picks the product
+        if (-not $script:BoundParams.ContainsKey('IsoLabel')) { $IsoLabel = 'VeeamSA' }
+        foreach ($r in $rows) {
+            $sz = Get-RowVmSize -Row $r
+            if ($sz.DiskGB -lt $script:VsaMinDiskGB -or $sz.DataDiskGB -lt $script:VsaMinDiskGB) {
+                throw "Row '$($r.hostname)': the Software Appliance needs two disks of at least $($script:VsaMinDiskGB) GB each (given $($sz.DiskGB) + $($sz.DataDiskGB) GB) - raise -VmDiskGB / -VmDataDiskGB or leave them unset."
+            }
+        }
+        $SkipRegister = $true
+        Write-Log ("Software Appliance run: {0}. Built from the VeeamSoftwareAppliance ISO (label {1}); the boot entry picks the product; no VBR registration." -f
+                   (($rows | ForEach-Object { "$($_.hostname) = $(Get-RoleLabel -Row $_)" }) -join ', '), $IsoLabel) 'INFO'
+    }
+
     if ($Vbr -eq '*' -and -not $SkipRegister -and -not $ValidateOnly -and -not $IsoOnly) {
         Write-Log ("Vbr='*' with registration enabled: all rows will be registered to the SINGLE " +
                    "connected VBR '$VBRServer'. A VIA binds to one VBR - make sure that is intended.") 'WARN'
@@ -2786,7 +2966,7 @@ try {
     if ($needDeploy -or $Rollback) { Initialize-PowerCLI }
     if ($needDeploy -or $IsoOnly) { Initialize-IsoToolchain }   # xorriso (via WSL on Windows) - required to build ISOs
     # Veeam PowerShell module is only needed for the cmdlet registration path.
-    if (($needRegister -or $Rollback) -and $RegisterVia -eq 'Cmdlet') { Initialize-VeeamModule }
+    if (($needRegister -or $Rollback) -and $RegisterVia -eq 'Cmdlet' -and -not $script:VsaRun) { Initialize-VeeamModule }
 
     # --- Validate required inputs per mode ---
     if ($needDeploy) {
@@ -2838,7 +3018,7 @@ try {
                 $vout  = Join-Path $stage ("_validate_{0}" -f $r0.hostname)
                 if (Test-Path $vout) { Remove-Item $vout -Recurse -Force }
                 $cfg = Get-PatchedApplianceConfigs -Row $r0 -BaseIso $BaseIso -Scratch $vout -SharedArtifacts $ws
-                Write-Log "ValidateOnly: patched $KickstartName + grub.cfg for '$($r0.hostname)' written to $vout (init block after: $($cfg.Anchor); grub default: $($cfg.GrubDefault); inst.assumeyes on $($cfg.KernelLines) kernel line(s)). The kickstart EMBEDS THE SECRETS - delete the folder after review." 'OK'
+                Write-Log "ValidateOnly: patched $($cfg.KsName) + grub.cfg for '$($r0.hostname)' written to $vout (init block after: $($cfg.Anchor); grub default: $($cfg.GrubDefault); inst.assumeyes on $($cfg.KernelLines) kernel line(s)). The kickstart EMBEDS THE SECRETS - delete the folder after review." 'OK'
             }
             elseif (-not $BaseIso) { Write-Log "ValidateOnly: -BaseIso not provided - skipped the extract/patch dry run (required for a real deploy)." 'WARN' }
         }
@@ -2859,7 +3039,8 @@ try {
     }
     # DNS preflight for the names the VBR will use - every registering mode, incl. register-only (warning only).
     if ($needRegister -and -not $ValidateOnly) { Test-RegistrationNames -Rows $rows }
-    if (($needRegister -or $Rollback) -and -not $ValidateOnly) {
+    # Software Appliance rows are never in a VBR: their rollback only removes the VM.
+    if (($needRegister -or $Rollback) -and -not $ValidateOnly -and -not $script:VsaRun) {
         if (-not $VBRCredential -and $VBRCredentialFile) { $VBRCredential = Read-CredentialFile -Path $VBRCredentialFile -Purpose 'VBR credential file' }
         if (-not $VBRCredential) {
             $VBRCredential = if ($VBRUser) { Get-Credential -UserName $VBRUser -Message "VBR $VBRServer - password for $VBRUser" }
@@ -2880,6 +3061,10 @@ try {
     $script:IsoWorkspace = $null
     if ($needDeploy -or $IsoOnly) {
         $secrets = Get-ApplianceSecrets -Path $ApplianceSecretsFile
+        if ($script:VsaRun -and [string]$secrets['VEEAMADMIN_MFA_ENABLED'] -ne 'true') {
+            Write-Log ("VEEAMADMIN_MFA_ENABLED is not true: a Software Appliance keeps Veeam Backup & Replication / Enterprise Manager unavailable " +
+                       "until veeamadmin sets up MFA in the Host Management Console (https://<ip>:10443). Set it to true with a TOTP seed for a hands-off install.") 'WARN'
+        }
         $script:IsoWorkspace = Initialize-IsoWorkspace -TemplateDir $TemplateDir -Secrets $secrets -OutDir $IsoStagingDir -Role $ApplianceRole
     }
 
@@ -2892,7 +3077,7 @@ try {
             $r0 = if ($rows.Count) { $rows[0] } else { $null }
             $pv = { param($k) if ($r0 -and $r0.PSObject.Properties[$k]) { [string]$r0.$k } else { '' } }
             $pseudo = [pscustomobject]@{ hostname = "$baseName-prompt"; _prompt = $true
-                _defaults = [pscustomobject]@{ netmask = (& $pv 'netmask'); gateway = (& $pv 'gateway'); dns = (& $pv 'dns'); netmask2 = (& $pv 'netmask2') } }
+                _defaults = [pscustomobject]@{ netmask = (& $pv 'netmask'); gateway = (& $pv 'gateway'); dns = (& $pv 'dns'); dnssearch = (& $pv 'dnssearch'); netmask2 = (& $pv 'netmask2') } }
             $iso = New-ApplianceIso -Row $pseudo -BaseIso $BaseIso -OutDir $IsoOutDir -SharedArtifacts $script:IsoWorkspace -Force
             $report.Add([pscustomobject][ordered]@{ vbr = $Vbr; hostname = '(asked at install)'; ip = '(asked at install)'; deploy = 'prompt iso'; register = 'skipped'; validate = 'n/a'; error = '' })
             foreach ($row in $rows) { $items.Add([pscustomobject]@{ Row = $row; Iso = $iso; Boot = '(type at the prompt)' }) }
@@ -2942,7 +3127,10 @@ try {
                 $gwRepos = @(Get-GatewayRepoNames -Row $row)
                 $as = Get-RoleLabel -Row $row
                 if ($gwRepos.Count) { $as += ' (gateway of: ' + ($gwRepos -join ', ') + ')' }
-                $entry.validate = "would build ISO + create UEFI VM ($VmCpu vCPU/$VmMemoryGB GB/$VmDiskGB GB) on $($row.cluster)/$($row.datastore); register to $($row.vbr) via $RegisterVia as $as"
+                $sz = Get-RowVmSize -Row $row
+                $hw = "$($sz.Cpu) vCPU/$($sz.MemoryGB) GB/$($sz.DiskGB) GB$(if ($sz.MultiDisk) { " + $($sz.DataDiskGB) GB" })"
+                $entry.validate = if (Get-RowVsaProduct -Row $row) { "would build ISO ($(Get-RowKickstart -Row $row)) + create UEFI VM ($hw) on $($row.cluster)/$($row.datastore) as $as; no registration" }
+                                  else { "would build ISO + create UEFI VM ($hw) on $($row.cluster)/$($row.datastore); register to $($row.vbr) via $RegisterVia as $as" }
                 Write-Log "VALIDATE '$($row.hostname)': $($entry.validate)" 'INFO'
             }
             else {
@@ -2964,6 +3152,11 @@ try {
                     $isoPath = New-ApplianceIso -Row $row -BaseIso $BaseIso -OutDir $IsoStagingDir -SharedArtifacts $script:IsoWorkspace
                     Invoke-StageA-Deploy -Row $row -IsoPath $isoPath
                     $entry.deploy = 'ok'
+                    $vsaP = Get-RowVsaProduct -Row $row
+                    if ($vsaP) {
+                        $entry.register = 'n/a (software appliance)'
+                        if (-not $WhatIfPreference) { $entry.validate = "$($vsaP.Label) up (HMC :$HmcPort, :$($vsaP.ServicePort))" }
+                    }
                 }
                 if ($needRegister) {
                     if ($RegisterVia -eq 'Rest') { Invoke-StageB-Register-Rest -Row $row } else { Invoke-StageB-Register -Row $row }

@@ -57,10 +57,17 @@ mkdir -p /opt/autodeploy/server-data/iso /opt/autodeploy/server-data/secrets /op
 cp -r "$P/project/." /opt/autodeploy/
 if [ -d "$P/iso" ]; then cp "$P"/iso/*.iso /opt/autodeploy/server-data/iso/ 2>/dev/null || true; fi
 
-# 2. pwsh 7 + xorriso (+ deps) from the payload; fall back to online resolution if a dependency is missing
-if ! dnf -y install --disablerepo='*' "$P"/rpms/*.rpm; then
+# 2. pwsh 7 + xorriso (+ deps) from the payload; fall back to online resolution if a dependency is missing.
+#    rsync goes in its OWN transaction: a build made for a newer Rocky minor (needs a newer libacl than the
+#    ISO installs) must not take PowerShell and xorriso down with it. rsync is only used for resumable
+#    copies to the server (large appliance ISOs over a weak link).
+CORE=$(ls "$P"/rpms/*.rpm | grep -v '/rsync-')
+if ! dnf -y install --disablerepo='*' $CORE; then
     echo "offline RPM install incomplete - retrying with online repositories"
-    dnf -y install "$P"/rpms/*.rpm || echo "WARNING: RPM install failed; install powershell + xorriso manually"
+    dnf -y install $CORE || echo "WARNING: RPM install failed; install powershell + xorriso manually"
+fi
+if ls "$P"/rpms/rsync-*.rpm >/dev/null 2>&1; then
+    dnf -y install --disablerepo='*' "$P"/rpms/rsync-*.rpm || dnf -y install rsync || echo "WARNING: rsync not installed (optional: resumable copies to the server)"
 fi
 dnf -y install open-vm-tools 2>/dev/null && systemctl enable vmtoolsd || echo "open-vm-tools not installed (offline) - optional"
 
