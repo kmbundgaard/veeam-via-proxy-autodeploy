@@ -932,6 +932,14 @@
     if (!$('r_vc').value) $('r_vc').value = $('c_vc').value;
     if (!$('r_vcuser').value) $('r_vcuser').value = $('c_vcuser').value;
     syncVbrFields();
+    syncIsoForVbr();
+  }
+  function syncIsoForVbr() {
+    // Preselect the ISO that fits the chosen VBR key's rows (only when the current pick does not fit).
+    const k = $('r_vbr').value; if (!k) return;
+    const want = groupIsVsa(k) ? /SoftwareAppliance/i : /InfrastructureAppliance/i;
+    const sel = $('r_iso'); if (want.test(sel.value)) return;
+    const hit = [...sel.options].find(o => want.test(o.value)); if (hit) sel.value = hit.value;
   }
   function syncVbrFields() {
     const v = state.vbrs[$('r_vbr').value] || {};
@@ -945,6 +953,12 @@
     if (bad) { toast(`${bad} row(s) for ${vbr} have errors. Fix them first.`); return; }
     const n = state.rows.filter(r => r.vbr === vbr).length;
     const vsaRun = groupIsVsa(vbr);
+    // The base ISO must match the rows: Software Appliance ISO for vbr / em, Infrastructure Appliance ISO otherwise.
+    const isoName = $('r_iso').value || '', isoVsa = /SoftwareAppliance/i.test(isoName), isoVia = /InfrastructureAppliance/i.test(isoName);
+    if (['Validate', 'WhatIf', 'DeployOnly', 'Full', 'IsoPerNode', 'IsoSingle', 'IsoPrompt'].includes(mode)) {
+      if (vsaRun && isoVia) { toast(`${vbr} holds Software Appliance rows (vbr / em): pick the VeeamSoftwareAppliance ISO, not ${isoName}.`); return; }
+      if (!vsaRun && isoVsa) { toast(`${vbr} holds proxy / gateway rows: pick the VeeamInfrastructureAppliance ISO, not ${isoName}.`); return; }
+    }
     if (vsaRun && ['RegisterOnly', 'IsoSingle', 'IsoPrompt'].includes(mode)) { toast('That mode does not apply to Software Appliance rows (vbr / em).'); return; }
     const warn = vsaRun ? {
       Rollback: `ROLLBACK: DELETE ${n} Software Appliance VM(s) of ${vbr} from vCenter. Continue?`,
@@ -1025,7 +1039,7 @@
     if (!confirm('Delete the ISO output of this run on the server? Copy the ISOs first.')) return;
     try { await api(`/api/runs/${b.dataset.delfiles}/files/delete`, { method: 'POST', body: '{}' }); toast('ISO output deleted.'); watchRun(b.dataset.delfiles); } catch (err) { toast(err.message); }
   });
-  $('r_vbr').addEventListener('change', syncVbrFields);
+  $('r_vbr').addEventListener('change', () => { syncVbrFields(); syncIsoForVbr(); });
   $('r_run').addEventListener('click', startRun);
   $('r_inv').addEventListener('click', async () => {
     const server = $('r_vc').value.trim(), user = $('r_vcuser').value.trim(), password = $('r_vcpass').value;

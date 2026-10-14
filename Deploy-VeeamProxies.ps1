@@ -2070,11 +2070,18 @@ function Get-PatchedApplianceConfigs {
     $exGrub = Join-Path $Scratch 'grub.cfg'
 
     # 1. Extract (read-only: -indev, never -dev, so the base ISO is never modified).
-    Invoke-Xorriso -Arguments @('-indev', (Convert-ToolPath $BaseIso), '-osirrox', 'on',
-        '-extract', "/$KickstartName", (Convert-ToolPath $exKs),
-        '-extract', '/EFI/BOOT/grub.cfg', (Convert-ToolPath $exGrub))
-    if (-not (Test-Path $exKs) -or -not (Test-Path $exGrub)) {
+    # A missing file makes xorriso abort (exit 5) before anything is written: catch that and explain it
+    # (lab 2026-10-14: vbr / em rows run against the Infrastructure Appliance ISO gave a bare "xorriso failed").
+    $xErr = $null
+    try {
+        Invoke-Xorriso -Arguments @('-indev', (Convert-ToolPath $BaseIso), '-osirrox', 'on',
+            '-extract', "/$KickstartName", (Convert-ToolPath $exKs),
+            '-extract', '/EFI/BOOT/grub.cfg', (Convert-ToolPath $exGrub))
+    }
+    catch { $xErr = $_ }
+    if ($xErr -or -not (Test-Path $exKs) -or -not (Test-Path $exGrub)) {
         if (Get-RowVsaProduct -Row $Row) { throw "Could not extract /$KickstartName and /EFI/BOOT/grub.cfg from '$BaseIso'. CSV role '$($Row.role)' needs the Veeam SOFTWARE Appliance ISO (VeeamSoftwareAppliance_13.1.x: /vbr-ks.cfg + /vbem-ks.cfg), not the Infrastructure Appliance ISO." }
+        if ($KickstartName -eq 'proxy-ks.cfg' -and (Split-Path $BaseIso -Leaf) -match 'SoftwareAppliance') { throw "Could not extract /$KickstartName from '$BaseIso'. CSV role '$($Row.role)' is an Infrastructure Appliance role (proxy / gateway) and needs the Veeam INFRASTRUCTURE Appliance ISO (VeeamInfrastructureAppliance_13.1.x), not the Software Appliance ISO." }
         throw "Could not extract /$KickstartName and /EFI/BOOT/grub.cfg from '$BaseIso'. List the ISO root with 'xorriso -indev <iso> -find / -maxdepth 1': 13.1 ships /proxy-ks.cfg, 13.0.x shipped /vmware-proxy-ks.cfg (pass -KickstartName)."
     }
 

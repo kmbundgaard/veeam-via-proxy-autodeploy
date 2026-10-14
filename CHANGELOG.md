@@ -35,6 +35,9 @@
 - Deployment server, settings upload: refuses a file with the Security Officer on and no valid recovery
   token (before: only the run's full check caught it), splits `NTP_SERVERS` on `,` as well as `;`, and the
   page shows `recovery token set / missing` next to "Security Officer on".
+- Wrong base ISO for the rows (lab: `vbr` rows run with the Infrastructure Appliance ISO): the script now
+  says which ISO the role needs instead of a bare `xorriso failed (exit 5)`. The page preselects the
+  matching ISO for the chosen VBR key and refuses a mismatched pick before the run starts.
 
 - DNS search domain is back: the `-PromptIso` console asks for it (default = the hostname's domain, `-` =
   none) and CSV modes take an optional column `dnssearch` (`,`-separated). Both become anaconda
