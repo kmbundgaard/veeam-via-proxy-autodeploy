@@ -133,7 +133,10 @@ lines, then run `Deploy-VeeamProxies.ps1`. Section 1 of the usage guide lists th
 
 1. **Settings file.** Copy `appliance-secrets.example.conf`, replace every example value: the
    `veeamadmin` password, the TOTP seed (`Protect-DeploymentSecrets.ps1 -NewTotpSeed`) and your
-   NTP servers. The toolkit refuses the example values because they make the appliance's first boot
+   NTP servers. If you turn the Security Officer on (`VEEAMSO_ENABLED = true`), it also needs its own
+   password, its own seed (`-NewTotpSeed` again) and a recovery token
+   (`Protect-DeploymentSecrets.ps1 -NewRecoveryToken`, which prints a GUID). Keep the token in your
+   password vault: it is the Security Officer's break-glass token. The toolkit refuses the example values because they make the appliance's first boot
    fail. Upload it through the web page (stored encrypted) or encrypt it with
    `Protect-DeploymentSecrets.ps1 -Encrypt` for command-line runs. One file per VBR.
 2. **Plan the fleet** in `Fleet-Planner.html`: your own host name pattern (`{namespace}-{nn}` by

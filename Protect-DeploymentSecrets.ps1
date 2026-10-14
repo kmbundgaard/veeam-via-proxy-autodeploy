@@ -17,6 +17,8 @@
       -Show       -KeyFile k.key -In x.enc                 decrypt and print with values masked (-Reveal shows them)
       -NewTotpSeed                                          print a fresh 16-character Base32 TOTP seed (for
                                                             VEEAMADMIN_MFA_SECRET / an authenticator entry)
+      -NewRecoveryToken                                     print a fresh Security Officer recovery token
+                                                            (GUID, for VEEAMSO_RECOVERY_TOKEN)
 
 .EXAMPLE
     ./Protect-DeploymentSecrets.ps1 -NewKey -KeyFile /secure/vbr01.key
@@ -32,6 +34,7 @@ param(
     [Parameter(ParameterSetName = 'Credential', Mandatory)][switch]$Credential,
     [Parameter(ParameterSetName = 'Show', Mandatory)][switch]$Show,
     [Parameter(ParameterSetName = 'NewTotpSeed', Mandatory)][switch]$NewTotpSeed,
+    [Parameter(ParameterSetName = 'NewRecoveryToken', Mandatory)][switch]$NewRecoveryToken,
     [Parameter(ParameterSetName = 'NewKey', Mandatory)][Parameter(ParameterSetName = 'Encrypt', Mandatory)]
     [Parameter(ParameterSetName = 'Credential', Mandatory)][Parameter(ParameterSetName = 'Show', Mandatory)]
     [string]$KeyFile,
@@ -117,6 +120,12 @@ switch ($PSCmdlet.ParameterSetName) {
         $seed = -join ($rnd | ForEach-Object { $alphabet[$_ % 32] })
         Write-Output $seed
         Write-Host "New TOTP seed above (16-char Base32). Put it in VEEAMADMIN_MFA_SECRET and add it to your authenticator as a 'time-based' entry; every proxy built from that settings file shares it." -ForegroundColor DarkGray
+    }
+    'NewRecoveryToken' {
+        # The answer file's veeamso.recoveryToken: a hex GUID (Veeam Help Center, "Automating Installation
+        # with Initial Configuration"). Upper case, the form Deploy-VeeamProxies.ps1 writes.
+        Write-Output ([guid]::NewGuid().ToString().ToUpperInvariant())
+        Write-Host "New recovery token above. Put it in VEEAMSO_RECOVERY_TOKEN (needed only with VEEAMSO_ENABLED = true) and store it in your password vault: it is the Security Officer's break-glass token and cannot be read back from the appliance later." -ForegroundColor DarkGray
     }
     'NewKey' {
         $bytes = [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)

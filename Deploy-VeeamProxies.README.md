@@ -85,6 +85,11 @@ pwsh -File ./Protect-DeploymentSecrets.ps1 -NewKey -KeyFile /secure/vbr01.key
 # a fresh shared TOTP seed for VEEAMADMIN_MFA_SECRET (the same value goes into your authenticator app)
 pwsh -File ./Protect-DeploymentSecrets.ps1 -NewTotpSeed
 
+# only with VEEAMSO_ENABLED = true: the Security Officer needs its own password, its own TOTP seed
+# (-NewTotpSeed again) and a recovery token for VEEAMSO_RECOVERY_TOKEN. Store the token in your vault:
+# it is the SO break-glass token and cannot be read back from the appliance later.
+pwsh -File ./Protect-DeploymentSecrets.ps1 -NewRecoveryToken      # prints e.g. 3F2A9C1E-7B4D-4E8A-9C21-5D6E7F8A9B0C
+
 # the appliance settings file: start from appliance-secrets.example.conf and replace EVERY example
 # value (password, seed, NTP servers) - the script refuses the example values, because an unmodified
 # copy makes the appliance's first-boot configuration fail (see section 8)

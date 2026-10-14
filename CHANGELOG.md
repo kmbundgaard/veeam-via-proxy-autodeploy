@@ -29,6 +29,10 @@
   newer libacl than the 9.8 ISO) cannot block PowerShell and xorriso. Lab: `rsync-3.2.5-7.el9_8.2` installs
   offline on Rocky 9.8.
 
+- `Protect-DeploymentSecrets.ps1 -NewRecoveryToken` prints a Security Officer recovery token (GUID) for
+  `VEEAMSO_RECOVERY_TOKEN`. START-HERE, the README and the example settings file now explain when it is
+  needed (`VEEAMSO_ENABLED = true`) and that it belongs in a vault.
+
 - DNS search domain is back: the `-PromptIso` console asks for it (default = the hostname's domain, `-` =
   none) and CSV modes take an optional column `dnssearch` (`,`-separated). Both become anaconda
   `--ipv4-dns-search` on NIC 1. Fleet-Planner shows, checks and exports the column. Confirmed in the lab
