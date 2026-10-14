@@ -155,6 +155,10 @@ lines, then run `Deploy-VeeamProxies.ps1`. Section 1 of the usage guide lists th
 
 ## Good to know
 
+- **Many appliances at once.** A run deploys its rows one after the other by default. Set
+  *Appliances at a time* under Run commands (or pass `-Parallel 4`) to deploy several at the same time:
+  each row runs as its own worker, starts are 45 s apart, and you get one merged report. Not for Replace
+  runs or `gatewayrepo` rows. See section 4f of `Deploy-VeeamProxies.README.md`.
 - **Backup servers and Enterprise Manager too.** A CSV row with `role` = `vbr` or `em` deploys a Veeam
   Software Appliance (Backup & Replication server or Enterprise Manager) from the
   `VeeamSoftwareAppliance_13.1.x.iso`: same settings file, same Stage A, two 240 GB disks, no

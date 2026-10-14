@@ -364,6 +364,7 @@
         <label><input type="checkbox" id="c_logs"> <span>Logs on disk 2: set the appliance's <b>Logs location</b> (Host Management Console setting) to the data volume on the extra disk, <code>/var/lib/veeam/VeeamBackupLogFolder</code>, instead of disk 1 <span class="small muted">(VBR "Export logs" does not collect them there - use the support bundle in the appliance web UI)</span></span></label>
         <label><input type="checkbox" id="c_replace"> <span>Replace existing proxies: capture job pinning, remove from VBR, redeploy, re-pin (old VM is powered off and renamed)</span></label>
         <label>While replacing, jobs pinned only to that proxy are <select id="c_replacePolicy"><option value="Auto">switched to automatic selection</option><option value="Disable">disabled until it is back</option></select></label>
+        <label title="Deploy this many appliances at the same time (-Parallel). Each one runs as its own worker: own ISO build, upload, VM and registration; starts are 45 s apart. 1 = one after the other.">Appliances at a time <input type="number" id="c_par" min="1" max="16" value="1" style="width:4.5em"></label>
         <label>Transport <select id="c_tm"><option>Auto</option><option>HotAdd</option><option>Nbd</option><option>DirectStorageAccess</option></select></label>
         <label>Appliance role <select id="c_role"><option value="InfrastructureServerIscsi">Infrastructure Server with iSCSI/FC/NVMe-oF</option><option value="InfrastructureServer">Infrastructure Server</option></select></label>
         <label>Shell <select id="c_shell"><option value="bash">Linux deploy host (bash)</option><option value="pwsh">Windows (PowerShell)</option></select></label>
@@ -463,7 +464,7 @@
   // ---------- persistence (per-viewer convenience only) ----------
   function save() {
     try {
-      const cmd = { csv: $('c_csv').value, iso: $('c_iso').value, vc: $('c_vc').value, vcuser: $('c_vcuser').value, dns: $('c_dns').value, tls: $('c_tls').checked, rb: $('c_rb').checked, isoOnly: $('c_isoonly').checked, single: $('c_single').checked, logs: $('c_logs').checked, tm: $('c_tm').value, role: $('c_role').value, shell: $('c_shell').value };
+      const cmd = { csv: $('c_csv').value, iso: $('c_iso').value, vc: $('c_vc').value, vcuser: $('c_vcuser').value, dns: $('c_dns').value, tls: $('c_tls').checked, rb: $('c_rb').checked, isoOnly: $('c_isoonly').checked, single: $('c_single').checked, logs: $('c_logs').checked, tm: $('c_tm').value, role: $('c_role').value, shell: $('c_shell').value, par: $('c_par').value };
       localStorage.setItem(LS_KEY, JSON.stringify({ rows: state.rows, vbrs: state.vbrs, sizing: state.sizing, showHs: state.showHs, example: state.example, cmd }));
     } catch (e) { /* storage unavailable: fine */ }
   }
@@ -477,7 +478,7 @@
       state.vbrs = d.vbrs || {};
       state.sizing = Object.assign({ cpu: 6, ram: 12, disk: 120, data: 0 }, d.sizing || {});
       state.showHs = !!d.showHs; state.example = !!d.example;
-      if (d.cmd) { $('c_csv').value = d.cmd.csv || 'proxies.csv'; $('c_iso').value = d.cmd.iso || ''; $('c_vc').value = d.cmd.vc || ''; $('c_vcuser').value = d.cmd.vcuser || ''; $('c_dns').value = d.cmd.dns || ''; $('c_tls').checked = !!d.cmd.tls; $('c_rb').checked = !!d.cmd.rb; $('c_isoonly').checked = !!d.cmd.isoOnly; $('c_single').checked = d.cmd.single !== false; $('c_logs').checked = !!d.cmd.logs; $('c_tm').value = d.cmd.tm || 'Auto'; $('c_role').value = d.cmd.role || 'InfrastructureServerIscsi'; $('c_shell').value = d.cmd.shell || 'bash'; }
+      if (d.cmd) { $('c_par').value = d.cmd.par || '1'; $('c_csv').value = d.cmd.csv || 'proxies.csv'; $('c_iso').value = d.cmd.iso || ''; $('c_vc').value = d.cmd.vc || ''; $('c_vcuser').value = d.cmd.vcuser || ''; $('c_dns').value = d.cmd.dns || ''; $('c_tls').checked = !!d.cmd.tls; $('c_rb').checked = !!d.cmd.rb; $('c_isoonly').checked = !!d.cmd.isoOnly; $('c_single').checked = d.cmd.single !== false; $('c_logs').checked = !!d.cmd.logs; $('c_tm').value = d.cmd.tm || 'Auto'; $('c_role').value = d.cmd.role || 'InfrastructureServerIscsi'; $('c_shell').value = d.cmd.shell || 'bash'; }
       return true;
     } catch (e) { return false; }
   }
@@ -725,6 +726,8 @@
     const bash = $('c_shell').value === 'bash';
     const pfx = bash ? './' : '.\\', cont = bash ? ' \\\n  ' : ' `\n  ', invoke = bash ? 'pwsh -File ./Deploy-VeeamProxies.ps1' : 'pwsh -File .\\Deploy-VeeamProxies.ps1';
     const tm = $('c_tm').value, role = $('c_role').value, isoOnly = $('c_isoonly').checked;
+    const parN = Math.min(16, Math.max(1, parseInt($('c_par').value, 10) || 1)), par = parN > 1 ? ` -Parallel ${parN}` : '';
+    if (parN > 1 && $('c_replace').checked) out.insertAdjacentHTML('beforeend', `<p class="small"><span class="chip bad">Replace runs one proxy at a time: set "Appliances at a time" to 1 for a Replace run (parallel job re-pinning would overwrite itself).</span></p>`);
     // VM hardware + disk layout: only when not the script defaults (6 / 12 / 120, single disk).
     const s = state.sizing;
     const hw = (s.cpu !== 6 ? ` -VmCpu ${s.cpu}` : '') + (s.ram !== 12 ? ` -VmMemoryGB ${s.ram}` : '') + (s.disk !== 120 ? ` -VmDiskGB ${s.disk}` : '') +
@@ -744,7 +747,7 @@
         const vc1 = `${base}${cont}-vCenterServer ${vc}${vcUser ? ' -vCenterUser ' + vcUser : ''} -BaseIso ${pfx}${viso}${cont}-ApplianceSecretsFile ${pfx}${sec}`;
         const vsteps = isoOnly
           ? [['1 · Validate (offline)', va], ['2 · Build one ISO per appliance + VM build sheet (no vCenter, output in iso-out/)', `${base}${cont}-IsoOnly -BaseIso ${pfx}${viso}${cont}-ApplianceSecretsFile ${pfx}${sec}`]]
-          : [['1 · Validate (offline)', va], ['2 · What-if (connects to vCenter, changes nothing)', `${vc1} -WhatIf`], ['3 · Deploy (no VBR registration: these ARE the servers)', `${vc1}${$('c_rb').checked ? ' -RollbackOnFailure' : ''}`]];
+          : [['1 · Validate (offline)', va], ['2 · What-if (connects to vCenter, changes nothing)', `${vc1} -WhatIf`], ['3 · Deploy (no VBR registration: these ARE the servers)', `${vc1}${$('c_rb').checked ? ' -RollbackOnFailure' : ''}${par}`]];
         const vb = document.createElement('div'); vb.className = 'cmdblock';
         const nn = g.get(k).n;
         vb.innerHTML = `<div class="cmdhead"><span class="t"><span class="mono">${esc(k)}</span> · ${nn} Software Appliance${nn === 1 ? '' : 's'} (vbr / em)</span><span class="grow"></span></div>` +
@@ -759,12 +762,12 @@
         (tm !== 'Auto' ? ` -TransportMode ${tm}` : '') + (role !== 'InfrastructureServerIscsi' ? ` -ApplianceRole ${role}` : '') + hw;
       const dnsCmd = dns ? `pwsh -File .\\New-ProxyDnsRecords.ps1 -CsvPath .\\${csv} -Vbr ${k} -DnsServer ${dns} -Credential (Get-Credential) -WhatIf   # then without -WhatIf` : null;
       const b = `${common} -WhatIf`;
-      const c = `${common}${$('c_rb').checked ? ' -RollbackOnFailure' : ''}${$('c_replace').checked ? ' -Replace' + ($('c_replacePolicy').value === 'Disable' ? ' -ReplaceJobPolicy Disable' : '') : ''}`;
+      const c = `${common}${$('c_rb').checked ? ' -RollbackOnFailure' : ''}${$('c_replace').checked ? ' -Replace' + ($('c_replacePolicy').value === 'Disable' ? ' -ReplaceJobPolicy Disable' : '') : par}`;
       // No vCenter access: build the ISO(s) + VM build sheet here, register once the VMs are up.
       const isoCmd = `${base}${cont}-IsoOnly${$('c_single').checked ? ' -SingleIso' : ''} -BaseIso ${pfx}${iso}${cont}-ApplianceSecretsFile ${pfx}${sec}` +
         (role !== 'InfrastructureServerIscsi' ? ` -ApplianceRole ${role}` : '') + hw;
       const regCmd = `${base}${cont}-VBRServer ${vbr}${v.user ? ' -VBRUser ' + v.user : ''}` + ($('c_tls').checked ? ' -SkipTlsVerify' : '') +
-        (v.mfa ? `${cont}-VBRMfaSecretFile ${pfx}${v.mfa}` : '') + (tm !== 'Auto' ? ` -TransportMode ${tm}` : '') + ' -SkipDeploy';
+        (v.mfa ? `${cont}-VBRMfaSecretFile ${pfx}${v.mfa}` : '') + (tm !== 'Auto' ? ` -TransportMode ${tm}` : '') + ' -SkipDeploy' + par;
       const steps = isoOnly
         ? [['1 · Validate (offline)', a], [`2 · Build ${$('c_single').checked ? 'one ISO for all nodes' : 'one ISO per node'} + VM build sheet (no vCenter, output in iso-out/)`, isoCmd], ['3 · Register, once the VMs answer on :10443 (VBR access only)', regCmd]]
         : [['1 · Validate (offline)', a], ['2 · What-if (connects, changes nothing)', b], ['3 · Deploy + register', c]];
@@ -888,7 +891,7 @@
     document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
     toast(`Downloading ${a.download}. If nothing happens (sandboxed viewer), use Copy CSV.`);
   });
-  ['c_csv', 'c_iso', 'c_vc', 'c_vcuser', 'c_dns', 'c_tls', 'c_rb', 'c_isoonly', 'c_single', 'c_logs', 'c_replace', 'c_replacePolicy', 'c_tm', 'c_role', 'c_shell'].forEach(id => $(id).addEventListener('input', () => { renderCommands(); save(); }));
+  ['c_csv', 'c_iso', 'c_vc', 'c_vcuser', 'c_dns', 'c_tls', 'c_rb', 'c_isoonly', 'c_single', 'c_logs', 'c_replace', 'c_replacePolicy', 'c_tm', 'c_role', 'c_shell', 'c_par'].forEach(id => $(id).addEventListener('input', () => { renderCommands(); save(); }));
   ['cmdOut', 'reportWrap'].forEach(id => $(id).addEventListener('click', (e) => { const b = e.target.closest('button[data-copy]'); if (!b) return; const pre = b.parentElement.nextElementSibling; if (pre) copyText(pre.textContent); }));
   document.querySelectorAll('[data-theme-choice]').forEach(b => b.addEventListener('click', () => setTheme(b.dataset.themeChoice)));
 
@@ -971,12 +974,14 @@
       RegisterOnly: `Register ${n} proxy VM(s) of ${vbr} on the VBR. Continue?`,
     }[mode];
     if (warn && !confirm(warn)) return;
+    if (!vsaRun && $('c_replace').checked && (parseInt($('c_par').value, 10) || 1) > 1 && ['Full', 'RegisterOnly', 'WhatIf'].includes(mode)) { toast('Replace runs one proxy at a time: set "Appliances at a time" to 1.'); return; }
     if (!vsaRun && $('c_replace').checked && ['Full', 'RegisterOnly', 'WhatIf'].includes(mode) && !confirm('Replace mode: proxies in this CSV that already exist in the VBR are removed from it (their job pinning is captured first and restored after), their VMs are powered off and renamed, and fresh appliances take their names and IPs. Continue?')) return;
     const body = {
       csv: buildCsv(vbr), vbr, mode, iso: $('r_iso').value, settingsFile: $('r_settings').value,
       vcenter: { server: $('r_vc').value.trim(), user: $('r_vcuser').value.trim(), password: $('r_vcpass').value },
       vbrServer: { server: $('r_vbrsrv').value.trim(), user: $('r_vbruser').value.trim(), password: $('r_vbrpass').value, mfaFile: $('r_mfa').value },
       transportMode: $('c_tm').value, applianceRole: $('c_role').value, rollbackOnFailure: $('c_rb').checked, skipTls: $('c_tls').checked,
+      parallel: Math.min(16, Math.max(1, parseInt($('c_par').value, 10) || 1)),
       replace: $('c_replace').checked, replaceJobPolicy: $('c_replacePolicy').value,
       vmCpu: state.sizing.cpu, vmMemoryGB: state.sizing.ram, vmDiskGB: state.sizing.disk, dataDiskGB: state.sizing.data || 0,
       logsOnDataDisk: !!(state.sizing.data && $('c_logs').checked),

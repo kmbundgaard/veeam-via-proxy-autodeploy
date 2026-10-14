@@ -35,6 +35,15 @@
 - Deployment server, settings upload: refuses a file with the Security Officer on and no valid recovery
   token (before: only the run's full check caught it), splits `NTP_SERVERS` on `,` as well as `;`, and the
   page shows `recovery token set / missing` next to "Security Officer on".
+- **Parallel deployment, `-Parallel N` (1–16)** ("Appliances at a time" in Fleet-Planner and on the
+  deployment server). The run becomes an orchestrator with one worker process per row (one-row CSV, own staging
+  folder, sessions and report), at most N at once, starts `-ParallelStaggerSec` apart (45 s). Credentials are
+  asked once and handed over as encrypted files. Workers take unique TOTP time steps (shared lock file). Log
+  lines are prefixed with the host; one merged report. Checks the free staging space for N ISO builds. Refuses
+  `-Replace` and `gatewayrepo` rows (shared job / gateway lists would be overwritten). Validate / Rollback /
+  ISO-only stay sequential. Lab: `-WhatIf` with 2 VSA rows and with 2 proxy rows (VBR REST login per worker)
+  passed.
+- Under `-WhatIf`, PowerCLI's module start-up no longer prints a page of `Set Alias` / `TabExpansion2` lines.
 - Software Appliance rows wait up to 2 hours for readiness (proxies: 30 minutes). Lab: the first full `vbr`
   install was healthy but at package 692 of 771 after 30 minutes; the proxy-sized timeout plus *Rollback on
   failure* deleted it. The unattended boot, Secure Boot and kickstart were confirmed by that console screenshot.

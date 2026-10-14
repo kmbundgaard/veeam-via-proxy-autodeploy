@@ -111,6 +111,14 @@
     iSCSI/FC/NVMe-oF" (keeps Direct SAN / backup from storage snapshots open);
     InfrastructureServer = plain proxy.
 
+.PARAMETER Parallel
+    Deploy up to N rows at the same time (1-16, default 1 = one after the other). The run becomes an
+    orchestrator: one worker process per row (this script with a one-row CSV, its own staging folder,
+    vCenter/VBR sessions and report), at most N at once, starts -ParallelStaggerSec apart (default 45 s).
+    Credentials are asked once and handed to the workers encrypted. Refused with -Replace and with
+    'gatewayrepo' rows (shared job / gateway lists). -ValidateOnly, -Rollback and -IsoOnly stay sequential.
+    The staging folder needs about N x the base ISO size free (checked before the start).
+
 .PARAMETER MultiDisk
     Use the "Standard (Multi-Disk) Deployment" boot entry and give the VM a second data disk of
     -VmDataDiskGB. Default is the 13.1 "Single-Disk Deployment" entry (one 120 GB disk), which is
@@ -411,7 +419,19 @@ param(
     [ValidateSet('Auto', 'Disable')][string]$ReplaceJobPolicy = 'Auto',
     [switch]$PurgeOldVm,
 
-    [string]$ReportPath
+    [string]$ReportPath,
+
+    # --- Parallel deployment ---------------------------------------------------
+    # Deploy up to N rows at the same time. The run becomes an orchestrator: one worker process per row
+    # (this same script, a one-row CSV, its own staging folder, vCenter/VBR session and report), at most N at
+    # once, starts staggered by -ParallelStaggerSec. Log lines carry the row's host name; one merged report.
+    # Applies to deploy / register runs; -ValidateOnly, -Rollback and -IsoOnly stay sequential.
+    [ValidateRange(1, 16)][int]$Parallel = 1,
+    [ValidateRange(0, 600)][int]$ParallelStaggerSec = 45,
+    # Internal (set by the orchestrator for its workers): lock file that keeps TOTP codes unique across workers.
+    [Parameter(DontShow)][string]$TotpLockFile,
+    # Internal: set by the orchestrator on its workers (no further dispatch; the report is always written for it).
+    [Parameter(DontShow)][switch]$ParallelWorker
 )
 
 Set-StrictMode -Version Latest
@@ -419,6 +439,7 @@ $ErrorActionPreference = 'Stop'
 # Parameters the operator actually passed: VSA rows use their product's sizing for the -Vm* values
 # that were NOT given (Get-RowVmSize).
 $script:BoundParams = @{} + $PSBoundParameters
+$script:ParallelTmp = $null
 
 # Host OS (StrictMode-safe: $IsWindows is undefined on Windows PowerShell 5.1).
 $script:IsWindowsHost = if ($PSVersionTable.PSVersion.Major -lt 6) { $true } else { $IsWindows }
@@ -509,6 +530,11 @@ function Initialize-PowerCLI {
     #    name is already loaded".
     # Instead we import ONLY the core command module, whose name (VMware.VimAutomation.Core) is
     # identical under both the old VMware.PowerCLI and the new VCF.PowerCLI packages.
+    # Module load is not an infrastructure change: under -WhatIf, PowerCLI's own start-up (Set-Alias, Set-Item
+    # function:TabExpansion2 ...) would otherwise print each step, a page of noise per run / parallel worker.
+    # A module runs in its own scope tree under the GLOBAL scope, so the global preference matters too.
+    $outerWhatIf = $WhatIfPreference; $outerGlobalWhatIf = $global:WhatIfPreference
+    $WhatIfPreference = $false; $global:WhatIfPreference = $false
     if (-not (Get-Command -Name Connect-VIServer -ErrorAction SilentlyContinue)) {
 
         # Ensure PowerCLI is installed. On a dark site it is pre-staged, so this no-ops; only a
@@ -541,6 +567,7 @@ function Initialize-PowerCLI {
     # default) still fails Connect-VIServer with "The SSL connection could not be established".
     # -Scope User persists the setting to the PowerCLI config file and applies it on every
     # connect (this deploy host is dedicated to the run, so a persisted setting is acceptable).
+    $WhatIfPreference = $outerWhatIf; $global:WhatIfPreference = $outerGlobalWhatIf
     Set-PowerCLIConfiguration -Scope User -InvalidCertificateAction Ignore `
         -ParticipateInCeip $false -Confirm:$false | Out-Null
     Write-Log "PowerCLI ready." 'OK'
@@ -571,6 +598,35 @@ function Initialize-VeeamModule {
 # (built-in) - a first-class Veeam-supported interface, no extra modules.
 # ---------------------------------------------------------------------------
 $script:Rest = $null
+
+function Get-UniqueTotpCode {
+    # Parallel workers log in to the same VBR account, also on every token renewal (~15 min). Two workers in
+    # the same 30-second window would send the SAME code, which an MFA server may refuse as a replay. With
+    # -TotpLockFile (set by the orchestrator) each worker takes the next unused time step: a worker whose step
+    # is already taken waits for the next one (at most 30 s). Without it: plain Get-TotpCode.
+    param([Parameter(Mandatory)][string]$Base32Secret)
+    if (-not $TotpLockFile) { return Get-TotpCode -Base32Secret $Base32Secret }
+    $deadline = (Get-Date).AddMinutes(5)
+    while ((Get-Date) -lt $deadline) {
+        $fs = $null
+        try { $fs = [System.IO.File]::Open($TotpLockFile, 'OpenOrCreate', 'ReadWrite', 'None') }
+        catch [System.IO.IOException] { Start-Sleep -Milliseconds (200 + (Get-Random -Maximum 300)); continue }
+        try {
+            $buf = [byte[]]::new(64); $n = $fs.Read($buf, 0, 64)
+            $last = 0L; [void][long]::TryParse([Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim(), [ref]$last)
+            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); $step = [long][math]::Floor($now / 30)
+            if ($step -le $last) { $wait = 30 - ($now % 30) + 1 }
+            else {
+                $fs.SetLength(0); $b = [Text.Encoding]::ASCII.GetBytes("$step"); $fs.Write($b, 0, $b.Length); $fs.Flush()
+                return Get-TotpCode -Base32Secret $Base32Secret
+            }
+        }
+        finally { $fs.Dispose() }
+        Write-Log "TOTP: this 30-second code was just used by another worker - waiting ${wait}s for the next one." 'INFO'
+        Start-Sleep -Seconds $wait
+    }
+    throw "TOTP: could not get a unique code within 5 minutes (lock file $TotpLockFile)."
+}
 
 function Get-TotpCode {
     # RFC 6238 TOTP (the scheme Veeam appliance MFA uses): HMAC-SHA1 over an 8-byte big-endian
@@ -686,7 +742,7 @@ public class TrustAllCertsPolicy {
         if (-not $script:Rest.MfaSecret) {
             throw "VBR REST: account is MFA-enforced (received mfa_token) but no -VBRMfaSecret/-VBRMfaSecretFile was supplied."
         }
-        $code = Get-TotpCode -Base32Secret $script:Rest.MfaSecret
+        $code = Get-UniqueTotpCode -Base32Secret $script:Rest.MfaSecret
         $resp = Invoke-RestMethod -Method POST -Uri $tokenUri -Headers $headers `
             -ContentType 'application/x-www-form-urlencoded' -ErrorAction Stop @extra `
             -Body @{ grant_type = 'Mfa'; mfa_token = $resp.mfa_token; code = $code }
@@ -1618,6 +1674,29 @@ function Write-TextFileLF {
     $lf = $Text -replace "`r`n", "`n" -replace "`r", "`n"
     if (Test-Path -LiteralPath $Path) { (Get-Item -LiteralPath $Path).IsReadOnly = $false }   # files extracted from an ISO may be mode 444
     [System.IO.File]::WriteAllText($Path, $lf, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Write-WorkerSecretFile {
+    # Orchestrator -> worker hand-over of a secret (credential "user`npassword", TOTP seed): written encrypted
+    # with -SecretsKeyFile in the VEEAMENC1 format of Protect-DeploymentSecrets.ps1 (AES-256-CBC + HMAC-SHA256),
+    # mode 600, in a private folder the orchestrator deletes at the end. Never a plaintext secret on disk.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Text, [Parameter(Mandatory)][string]$KeyFile)
+    $raw = [Convert]::FromBase64String((Get-Content -LiteralPath $KeyFile -Raw).Trim())
+    $hk = [System.Security.Cryptography.HMACSHA256]::new($raw)
+    try { $encKey = $hk.ComputeHash([Text.Encoding]::UTF8.GetBytes('veeam-autodeploy-enc')); $macKey = $hk.ComputeHash([Text.Encoding]::UTF8.GetBytes('veeam-autodeploy-mac')) }
+    finally { $hk.Dispose() }
+    $aes = [System.Security.Cryptography.Aes]::Create()
+    try {
+        $aes.KeySize = 256; $aes.Key = $encKey; $aes.Mode = 'CBC'; $aes.Padding = 'PKCS7'; $aes.GenerateIV()
+        $plain = [Text.Encoding]::UTF8.GetBytes($Text)
+        [byte[]]$ivct = $aes.IV + $aes.CreateEncryptor().TransformFinalBlock($plain, 0, $plain.Length)
+    }
+    finally { $aes.Dispose() }
+    $hm = [System.Security.Cryptography.HMACSHA256]::new($macKey)
+    try { $tag = $hm.ComputeHash($ivct) } finally { $hm.Dispose() }
+    New-Item -ItemType File -Path $Path -Force -WhatIf:$false | Out-Null
+    if (-not $script:IsWindowsHost) { & chmod 600 $Path }
+    [System.IO.File]::WriteAllText($Path, "VEEAMENC1`n" + [Convert]::ToBase64String([byte[]]($ivct + $tag)) + "`n")
 }
 
 function Read-ProtectedText {
@@ -2914,6 +2993,96 @@ function Invoke-Rollback {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Parallel run (-Parallel N): orchestrate one worker process per row
+# ---------------------------------------------------------------------------
+function Invoke-ParallelRun {
+    # One worker = this script with a one-row CSV, its own -IsoStagingDir (<staging>/<host>) and -ReportPath,
+    # credentials handed over as encrypted files. Returns the workers' report rows. The per-row logic is the
+    # sequential code path, unchanged.
+    param([Parameter(Mandatory)][object[]]$Rows, [Parameter(Mandatory)][int]$Throttle)
+    # Inside the staging folder, so a run the deployment server cancels (kills) is scrubbed by its clean-up too.
+    $tmp = Join-Path $IsoStagingDir ("_parallel-" + [guid]::NewGuid().ToString('N').Substring(0, 10))
+    New-Item -ItemType Directory -Path $tmp -Force -WhatIf:$false | Out-Null
+    if (-not $script:IsWindowsHost) { & chmod 700 $tmp }
+    $script:ParallelTmp = $tmp                      # removed in the main finally block, also after Ctrl-C
+
+    # Key for the hand-over files: the operator's -SecretsKeyFile, else a throw-away key in the private folder.
+    $key = $SecretsKeyFile
+    if (-not $key) {
+        $key = Join-Path $tmp 'worker.key'
+        Set-Content -LiteralPath $key -Value ([Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))) -WhatIf:$false
+        if (-not $script:IsWindowsHost) { & chmod 600 $key }
+    }
+    $credArgs = [System.Collections.Generic.List[string]]::new()
+    $credArgs.AddRange([string[]]@('-SecretsKeyFile', $key))
+    $needVc  = -not $SkipDeploy
+    $needVbr = -not $SkipRegister
+    if ($needVc) {
+        if ($vCenterCredentialFile -and -not $vCenterCredential) { $credArgs.AddRange([string[]]@('-vCenterCredentialFile', $vCenterCredentialFile)) }
+        else {
+            $c = if ($vCenterCredential) { $vCenterCredential } elseif ($vCenterUser) { Get-Credential -UserName $vCenterUser -Message "vCenter $vCenterServer - password for $vCenterUser" } else { Get-Credential -Message "vCenter $vCenterServer - user name and password" }
+            $f = Join-Path $tmp 'vcenter.cred'; Write-WorkerSecretFile -Path $f -KeyFile $key -Text ("{0}`n{1}`n" -f $c.UserName, $c.GetNetworkCredential().Password)
+            $credArgs.AddRange([string[]]@('-vCenterCredentialFile', $f))
+        }
+    }
+    if ($needVbr) {
+        if ($VBRCredentialFile -and -not $VBRCredential) { $credArgs.AddRange([string[]]@('-VBRCredentialFile', $VBRCredentialFile)) }
+        else {
+            $c = if ($VBRCredential) { $VBRCredential } elseif ($VBRUser) { Get-Credential -UserName $VBRUser -Message "VBR $VBRServer - password for $VBRUser" } else { Get-Credential -Message "VBR $VBRServer - user name and password" }
+            $f = Join-Path $tmp 'vbr.cred'; Write-WorkerSecretFile -Path $f -KeyFile $key -Text ("{0}`n{1}`n" -f $c.UserName, $c.GetNetworkCredential().Password)
+            $credArgs.AddRange([string[]]@('-VBRCredentialFile', $f))
+        }
+        if ($VBRMfaSecret) { $f = Join-Path $tmp 'vbr.mfa'; Write-WorkerSecretFile -Path $f -KeyFile $key -Text $VBRMfaSecret; $credArgs.AddRange([string[]]@('-VBRMfaSecretFile', $f)) }
+        elseif ($VBRMfaSecretFile) { $credArgs.AddRange([string[]]@('-VBRMfaSecretFile', $VBRMfaSecretFile)) }
+        $credArgs.AddRange([string[]]@('-TotpLockFile', (Join-Path $tmp 'totp.lock')))
+    }
+
+    # Everything else the operator passed goes to every worker as given.
+    $skip = @('CsvPath', 'IsoStagingDir', 'ReportPath', 'Parallel', 'ParallelStaggerSec', 'TotpLockFile', 'ParallelWorker', 'SecretsKeyFile',
+              'vCenterCredential', 'vCenterCredentialFile', 'vCenterUser', 'VBRCredential', 'VBRCredentialFile', 'VBRUser',
+              'VBRMfaSecret', 'VBRMfaSecretFile', 'Confirm', 'Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction')
+    $base = [System.Collections.Generic.List[string]]::new()
+    foreach ($k in $script:BoundParams.Keys) {
+        if ($k -in $skip) { continue }
+        $v = $script:BoundParams[$k]
+        if ($v -is [System.Management.Automation.SwitchParameter]) { if ($v.IsPresent) { $base.Add("-$k") } }
+        elseif ($v -is [bool]) { if ($v) { $base.Add("-$k") } }
+        else { $base.Add("-$k"); $base.Add([string]$v) }
+    }
+    # Values the run itself settled (defaults the operator did not pass, the VSA settings) go explicitly.
+    foreach ($k in @('ApplianceRole', 'IsoLabel')) { if (-not $script:BoundParams.ContainsKey($k)) { $base.Add("-$k"); $base.Add([string](Get-Variable -Name $k -ValueOnly)) } }
+    $base.AddRange($credArgs)
+    # Workers run non-interactively: never let one stop at a confirmation prompt (the script is ConfirmImpact High).
+    $base.Add('-Confirm:$false'); $base.Add('-ParallelWorker')
+
+    $items = for ($i = 0; $i -lt $Rows.Count; $i++) {
+        $r = $Rows[$i]; $h = [string]$r.hostname; $safe = $h -replace '[^A-Za-z0-9._-]', '_'
+        $csv = Join-Path $tmp "$safe.csv"; @($r) | Export-Csv -LiteralPath $csv -NoTypeInformation -WhatIf:$false
+        [pscustomobject]@{ Index = $i; Host = $h; Csv = $csv; Staging = (Join-Path $IsoStagingDir $safe); Report = (Join-Path $tmp "$safe.report.csv") }
+    }
+    $pwshExe = (Get-Process -Id $PID).Path
+    Write-Log ("Parallel: {0} row(s), up to {1} at a time, starts {2}s apart. Each line below is prefixed with its host." -f $Rows.Count, $Throttle, $ParallelStaggerSec) 'STEP'
+    $baseArr = $base.ToArray(); $stagger = $ParallelStaggerSec; $self = $PSCommandPath
+    $items | ForEach-Object -ThrottleLimit $Throttle -Parallel {
+        $it = $_
+        # Stagger the first wave (later rows start when a slot frees, which spreads them already).
+        if ($it.Index -gt 0 -and $it.Index -lt $using:Throttle) { Start-Sleep -Seconds ($it.Index * $using:stagger) }
+        $short = ($it.Host -split '\.')[0]
+        $args2 = @($using:baseArr) + @('-CsvPath', $it.Csv, '-IsoStagingDir', $it.Staging, '-ReportPath', $it.Report)
+        & $using:pwshExe -NoProfile -NonInteractive -File $using:self @args2 2>&1 | ForEach-Object { "[$short] $_" }
+        "[$short] worker exit code $LASTEXITCODE"
+    } | ForEach-Object { Write-Host $_ }
+
+    $out = foreach ($it in $items) {
+        if (Test-Path -LiteralPath $it.Report) { Import-Csv -LiteralPath $it.Report }
+        else { [pscustomobject][ordered]@{ vbr = ''; hostname = $it.Host; ip = ''; deploy = 'unknown'; register = 'unknown'; validate = 'n/a'; error = 'worker ended without a report - see its log lines above' } }
+    }
+    # Each worker cleared its own staging folder; remove the empty per-host folders.
+    foreach ($it in $items) { if ((Test-Path -LiteralPath $it.Staging) -and -not (Get-ChildItem -LiteralPath $it.Staging -Force -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $it.Staging -Force -ErrorAction SilentlyContinue -WhatIf:$false } }
+    return @($out)
+}
+
 # ===========================================================================
 # MAIN
 # ===========================================================================
@@ -2958,6 +3127,43 @@ try {
         $SkipRegister = $true
         Write-Log ("Software Appliance run: {0}. Built from the VeeamSoftwareAppliance ISO (label {1}); the boot entry picks the product; no VBR registration." -f
                    (($rows | ForEach-Object { "$($_.hostname) = $(Get-RoleLabel -Row $_)" }) -join ', '), $IsoLabel) 'INFO'
+    }
+
+    # --- Parallel (-Parallel N): hand the rows to worker processes, then report ---
+    if ($Parallel -gt 1 -and -not $ParallelWorker) {
+        $parSkip = if ($ValidateOnly -or $Rollback -or $IsoOnly) { 'this mode runs sequentially' } elseif ($rows.Count -lt 2) { 'the selection has only one row' } else { $null }
+        if ($parSkip) { Write-Log "-Parallel $Parallel ignored: $parSkip." 'INFO' }
+        else {
+            # Two appliances updating the SAME list at once would overwrite each other's change.
+            if ($Replace) { throw "-Replace cannot run in parallel: it re-pins job proxy lists that several proxies can share (two replacements at once would overwrite each other's job edits). Run -Replace without -Parallel." }
+            if (@($rows | Where-Object { @(Get-GatewayRepoNames -Row $_).Count }).Count) { throw "Rows with 'gatewayrepo' cannot run in parallel: they edit repository gateway lists that several rows can share. Run them in a separate run without -Parallel." }
+            if (-not $SkipRegister -and $RegisterVia -ne 'Rest') { throw "-Parallel needs -RegisterVia Rest (the cmdlet path is not supported in parallel)." }
+            # Fail ONCE here instead of in every worker.
+            if (-not $SkipDeploy) {
+                if (-not $BaseIso)              { throw "-BaseIso is required for the deploy stage." }
+                if (-not $ApplianceSecretsFile) { throw "-ApplianceSecretsFile is required for the deploy stage." }
+                if (-not $vCenterServer)        { throw "-vCenterServer is required for the deploy stage." }
+                $null = Get-ApplianceSecrets -Path $ApplianceSecretsFile
+            }
+            if (-not $SkipRegister -and -not $VBRServer) { throw "-VBRServer is required for the register stage." }
+            if (-not $IsoStagingDir) { $IsoStagingDir = Join-Path (Split-Path -Parent (Resolve-Path $CsvPath)) 'iso-staging' }
+            if (-not (Test-Path -LiteralPath $IsoStagingDir)) { New-Item -ItemType Directory -Path $IsoStagingDir -Force -WhatIf:$false | Out-Null }
+            # Every worker builds its own copy of the base ISO at the same time.
+            if (-not $SkipDeploy) {
+                $full = (Resolve-Path -LiteralPath $IsoStagingDir).Path
+                $drive = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $full.StartsWith($_.RootDirectory.FullName) } | Sort-Object { $_.RootDirectory.FullName.Length } -Descending | Select-Object -First 1
+                $isoSize = (Get-Item -LiteralPath $BaseIso).Length; $wave = [math]::Min($Parallel, $rows.Count)
+                if ($drive -and $drive.AvailableFreeSpace -lt ($wave * $isoSize + 2GB)) {
+                    $fit = [math]::Max(1, [math]::Floor(($drive.AvailableFreeSpace - 2GB) / $isoSize))
+                    throw ("-Parallel {0}: the staging folder '{1}' has {2:N0} GB free, {0} simultaneous ISO builds need about {3:N0} GB ({4:N1} GB each + 2 GB). Use -Parallel {5} or free some space." -f
+                           $wave, $IsoStagingDir, ($drive.AvailableFreeSpace / 1GB), (($wave * $isoSize + 2GB) / 1GB), ($isoSize / 1GB), $fit)
+                }
+            }
+            foreach ($e in @(Invoke-ParallelRun -Rows $rows -Throttle $Parallel)) { $report.Add($e) }
+            $failed = @($report | Where-Object { $_.error }).Count
+            Write-Log ("Parallel run finished: {0} row(s), {1} failed." -f $report.Count, $failed) $(if ($failed) { 'ERROR' } else { 'OK' })
+            exit $(if ($failed) { 2 } else { 0 })     # the finally block below still writes the merged report and cleans up
+        }
     }
 
     if ($Vbr -eq '*' -and -not $SkipRegister -and -not $ValidateOnly -and -not $IsoOnly) {
@@ -3231,8 +3437,9 @@ finally {
             $reportDir = if ($CsvPath) { Split-Path -Parent (Resolve-Path $CsvPath) } else { (Get-Location).Path }
             $ReportPath = Join-Path $reportDir ("DeployReport_{0}_{1}.csv" -f ($Vbr -replace '\*', 'all'), $stamp)
         }
-        $report | Export-Csv -Path $ReportPath -NoTypeInformation
-        if ($WhatIfPreference) { Write-Log "WHATIF: run report would be written to $ReportPath" 'INFO' } else { Write-Log "Run report written: $ReportPath" 'OK' }
+        # A parallel worker always writes its report: the orchestrator reads it (also under -WhatIf).
+        $report | Export-Csv -Path $ReportPath -NoTypeInformation -WhatIf:$($WhatIfPreference -and -not $ParallelWorker)
+        if ($WhatIfPreference -and -not $ParallelWorker) { Write-Log "WHATIF: run report would be written to $ReportPath" 'INFO' } else { Write-Log "Run report written: $ReportPath" 'OK' }
         $report | Format-Table -AutoSize | Out-String | Write-Host
     }
 
@@ -3263,6 +3470,8 @@ finally {
     # --- Disconnect ---
     if ($vbrConn) { Disconnect-VBRServer -ErrorAction SilentlyContinue }
     if ($vcConn)  { Disconnect-VIServer -Server $vCenterServer -Confirm:$false -ErrorAction SilentlyContinue }
+    # Parallel run: the private hand-over folder (worker CSVs, encrypted credential files, throw-away key).
+    if ($script:ParallelTmp -and (Test-Path -LiteralPath $script:ParallelTmp)) { Remove-Item -LiteralPath $script:ParallelTmp -Recurse -Force -WhatIf:$false -ErrorAction SilentlyContinue }
     Write-Log "Done." 'STEP'
 }
 

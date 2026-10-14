@@ -180,15 +180,18 @@ function Complete-Run {
     Clear-RunSecrets -Dir $dir
 }
 function Clear-RunSecrets {
+    # Everything under a run dir that holds secrets: per-run credential files, the rendered answer file and
+    # first-boot artifacts, per-node ISOs (each embeds the answer file) and a parallel run's hand-over folder.
+    # -Recurse: a parallel run keeps one staging folder per host (<staging>/<host>/<host>.iso).
     param([string]$Dir)
     Get-ChildItem $Dir -Filter '*.cred' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-    $stg = Join-Path $dir 'staging'
+    $stg = Join-Path $Dir 'staging'
     if (Test-Path $stg) {
-        Get-ChildItem $stg -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Extension -eq '.iso' -or $_.Name -in @('vbr_init.cfg', 'veeam-init.sh', 'veeam-init.service') } |
+        Get-ChildItem $stg -Directory -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '_build_*' -or $_.Name -like '_validate_*' -or $_.Name -like '_parallel-*' } |
+            Sort-Object { $_.FullName.Length } -Descending | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        Get-ChildItem $stg -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in @('.iso', '.cred', '.mfa', '.key') -or $_.Name -in @('vbr_init.cfg', 'veeam-init.sh', 'veeam-init.service') } |
             Remove-Item -Force -ErrorAction SilentlyContinue
-        Get-ChildItem $stg -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '_build_*' -or $_.Name -like '_validate_*' } |
-            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 function Invoke-RunSweep {
@@ -295,6 +298,12 @@ function New-Run {
     if (-not $vsa -and (Get-Field $Req 'transportMode') -and (Get-Field $Req 'transportMode') -ne 'Auto') { if (([string](Get-Field $Req 'transportMode')) -notin @('HotAdd', 'Nbd', 'DirectStorageAccess')) { throw 'Bad transport mode.' }; $a.Add("-TransportMode $((Get-Field $Req 'transportMode'))") }
     if (-not $vsa -and (Get-Field $Req 'applianceRole') -and (Get-Field $Req 'applianceRole') -ne 'InfrastructureServerIscsi') { if (([string](Get-Field $Req 'applianceRole')) -notin @('InfrastructureServer', 'None')) { throw 'Bad appliance role.' }; $a.Add("-ApplianceRole $((Get-Field $Req 'applianceRole'))") }
     if ((Get-Field $Req 'rollbackOnFailure') -and $mode -in @('DeployOnly', 'Full')) { $a.Add('-RollbackOnFailure') }
+    # Appliances at a time (-Parallel): deploy / register modes only; the deploy script refuses unsafe combinations.
+    $par = Get-Field $Req 'parallel'
+    if ($null -ne $par -and [string]$par -ne '') {
+        $pn = 0; if (-not [int]::TryParse([string]$par, [ref]$pn) -or $pn -lt 1 -or $pn -gt 16) { throw 'Bad value for parallel (allowed 1-16).' }
+        if ($pn -gt 1 -and $mode -in @('WhatIf', 'DeployOnly', 'Full', 'RegisterOnly')) { $a.Add("-Parallel $pn") }
+    }
     # VM sizing and disk layout from the planner's sizing panel (script defaults: 6 vCPU / 12 GB / 120 GB, one disk).
     # It is the PROXY sizing: Software Appliance rows keep the script's per-product sizing (two disks of 240 GB+).
     $int = { param($k, [int]$min, [int]$max)
@@ -485,7 +494,7 @@ if ($ListenAddress -notin @('127.0.0.1', 'localhost', '::1')) { Write-SrvLog "Li
 # left to wait for, so scrub their secrets now. They keep the state 'interrupted' (no exit.json is written).
 foreach ($d in @(Get-ChildItem $RunsDir -Directory -ErrorAction SilentlyContinue)) {
     if (Test-Path (Join-Path $d.FullName 'exit.json')) { continue }
-    $left = @(Get-ChildItem $d.FullName -Filter '*.cred' -ErrorAction SilentlyContinue) + @(Get-ChildItem (Join-Path $d.FullName 'staging') -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq '.iso' -or $_.Name -in @('vbr_init.cfg', 'veeam-init.sh', 'veeam-init.service') })
+    $left = @(Get-ChildItem $d.FullName -Filter '*.cred' -ErrorAction SilentlyContinue) + @(Get-ChildItem (Join-Path $d.FullName 'staging') -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.iso', '.cred', '.mfa', '.key') -or $_.Name -in @('vbr_init.cfg', 'veeam-init.sh', 'veeam-init.service') })
     if ($left.Count) { Clear-RunSecrets -Dir $d.FullName; Write-SrvLog "run $($d.Name): interrupted by a server restart - $($left.Count) per-run credential / staged file(s) removed" 'WARN' }
 }
 try {

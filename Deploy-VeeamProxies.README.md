@@ -386,6 +386,8 @@ Things to check (from the Data Domain and StoreOnce pages of the user guide):
 | `-IsoOutDir` | `<CSV dir>/iso-out` | Output of `-IsoOnly`. Must differ from `-IsoStagingDir`. |
 | `-ValidateOnly` | off | Offline checks: CSV, secrets rules, template rendering, and (with `-BaseIso`) a real extract + patch dry run into `<staging>/_validate_<host>/`. |
 | `-Rollback` / `-RollbackOnFailure` | off | Teardown all rows / auto-clean a failed row. |
+| `-Parallel` | `1` | Deploy up to N rows at the same time (1–16), §4f. Each row runs as its own worker process; one merged report. Not with `-Replace` or `gatewayrepo` rows. |
+| `-ParallelStaggerSec` | `45` | Seconds between the starts of the first N workers (spreads ISO uploads and logins). |
 | `-Replace` | off | Redeploy over a proxy that already exists in VBR and keep its job assignments: capture the job lists that pin it, remove it, move the old VM aside, deploy + register the new appliance, re-pin (§4b). REST path only. |
 | `-ReplaceJobPolicy` | `Auto` | While the proxy is rebuilt, jobs pinned only to it switch to automatic proxy selection (`Auto`) or are disabled and re-enabled afterwards (`Disable`). |
 | `-PurgeOldVm` | off | With `-Replace`: delete the old VM instead of powering it off and renaming it `<host>-old-<stamp>`. |
@@ -699,6 +701,51 @@ Afterwards: log in as veeamadmin at `https://<ip>` (VBR web UI / Enterprise Mana
 `https://<ip>:10443` (Host Management). Add the backup servers to Enterprise Manager under
 **Configuration > Backup Servers** (a Linux VBR is added on port 443), and install licenses there.
 That step is not automated yet. Enterprise Manager has a REST call for it (`POST :9398/api/backupServers?action=create`).
+
+## 4f. Parallel deployment (`-Parallel`)
+
+By default a run deploys its rows one after the other (about 25 minutes per proxy). For a large fleet,
+`-Parallel N` deploys up to N appliances at the same time. In Fleet-Planner, set it under *Run commands*
+→ **Appliances at a time**; the commands and the Run button pick it up.
+
+```bash
+pwsh -File ./Deploy-VeeamProxies.ps1 -CsvPath ./proxies.csv -Vbr vbr01 -vCenterServer vc01.corp.local \
+  -BaseIso ./VeeamInfrastructureAppliance_13.1.1.18_20260825.iso -ApplianceSecretsFile ./appliance-secrets-vbr01.enc \
+  -SecretsKeyFile /secure/vbr01.key -VBRServer vbr01.corp.local -VBRUser svc-autodeploy -Parallel 4
+```
+
+How it works:
+
+- **The run becomes an orchestrator.** It checks the CSV, the settings file and the input parameters
+  once, then starts one **worker** per row. A worker is this same script with a one-row CSV, its own
+  staging folder, its own vCenter and VBR sessions and its own report. At most N workers run at once; when
+  one finishes, the next row starts. The per-row logic (deploy, register, rollback on failure) is the normal
+  sequential code, unchanged.
+- **Credentials are asked for once.** If you are prompted, the answer is handed to the workers as encrypted
+  files (`-SecretsKeyFile`, or a throw-away key) in a private folder under the staging folder. The folder is
+  deleted at the end, also after Ctrl-C or when the deployment server cancels the run.
+- **Staggered starts:** the first N workers start `-ParallelStaggerSec` apart (default 45 s), so ISO uploads
+  and logins do not all hit vCenter and the VBR in the same second.
+- **MFA:** every worker logs in to the same VBR account. A TOTP code is only valid once per 30-second window
+  on some MFA servers, so the workers share a lock file and each one uses its own time step (a worker may
+  wait up to 30 s for a fresh code).
+- **Output:** every log line carries the row's host name (`[prx-vbr01-07] ...`). At the end there is one
+  merged run report; the exit code is 2 when any row failed.
+
+Limits and sizing:
+
+- **Disk:** every running worker builds its own copy of the base ISO, so the staging folder needs about
+  N × the ISO size free (VIA 13.1: 2.6 GB, VSA: 15 GB). The run checks this first and tells you the largest
+  N that fits.
+- **Refused in parallel:** `-Replace`, and rows with `gatewayrepo`. Both edit lists that several appliances
+  can share (a job's proxy list, a repository's gateway list), and two workers writing the same list at once
+  would overwrite each other's change. Run those rows without `-Parallel`. `-RegisterVia Cmdlet` is also
+  not supported in parallel.
+- **Sequential anyway:** `-ValidateOnly`, `-Rollback` and the `-IsoOnly` modes ignore `-Parallel` (they are
+  quick or touch nothing).
+- **Choosing N:** 4 is a good start. Each worker uploads one ISO and creates one VM at a time, so more
+  workers mostly load the datastore and the vCenter upload path. 100 proxies at N = 4 take about
+  10–11 hours instead of about 42.
 
 ---
 
