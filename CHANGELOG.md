@@ -35,6 +35,9 @@
 - Deployment server, settings upload: refuses a file with the Security Officer on and no valid recovery
   token (before: only the run's full check caught it), splits `NTP_SERVERS` on `,` as well as `;`, and the
   page shows `recovery token set / missing` next to "Security Officer on".
+- Software Appliance rows wait up to 2 hours for readiness (proxies: 30 minutes). Lab: the first full `vbr`
+  install was healthy but at package 692 of 771 after 30 minutes; the proxy-sized timeout plus *Rollback on
+  failure* deleted it. The unattended boot, Secure Boot and kickstart were confirmed by that console screenshot.
 - Wrong base ISO for the rows (lab: `vbr` rows run with the Infrastructure Appliance ISO): the script now
   says which ISO the role needs instead of a bare `xorriso failed (exit 5)`. The page preselects the
   matching ISO for the chosen VBR key and refuses a mismatched pick before the run starts.

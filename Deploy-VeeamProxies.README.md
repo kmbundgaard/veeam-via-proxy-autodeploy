@@ -668,6 +668,9 @@ How it differs from a proxy run:
   and the installer stops on a smaller or missing disk. `-VmCpu` / `-VmMemoryGB` / `-VmDiskGB` /
   `-VmDataDiskGB` override the per-product sizing when you pass them. The backup server needs
   +500 MB RAM per concurrent job on top of 16 GB.
+- **Install time:** much longer than a proxy (about 770 packages). VSA rows wait up to **2 hours** for the
+  Host Management Console (`-IsoReadyTimeoutSec` overrides it); proxies keep 30 minutes. With
+  *Rollback on failure* a timeout deletes the VM, so for a first test leave it off and look at the console.
 - **No Stage B.** These *are* the servers: there is nothing to register to a VBR. The run waits for the
   Host Management Console (`:10443`) and then for the product on `:443` (VBR web UI + REST API, or the
   Enterprise Manager web UI). The run report shows `register = n/a (software appliance)`.

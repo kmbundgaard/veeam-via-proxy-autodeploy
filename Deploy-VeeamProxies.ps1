@@ -1144,6 +1144,10 @@ function Get-RoleLabel {
 # Manager 2 vCPU / 6 GB minimum, 4 vCPU / 16 GB recommended. Readiness port: 443 for both (13.x moved
 # the VBR REST API to 443 next to the web UI; 9419 is kept for Swagger / backward compatibility).
 $script:VsaMinDiskGB = 240
+# Install + first boot of a VSA takes far longer than a proxy: lab 2026-10-14, the unattended VBR install was
+# at package 692 of 771 after 30 minutes (proxy-sized -IsoReadyTimeoutSec 1800 timed out, the run rolled the
+# healthy VM back). VSA rows wait this long unless -IsoReadyTimeoutSec is given.
+$script:VsaReadyTimeoutSec = 7200
 $script:VsaProducts = @{
     vbr = [pscustomobject]@{
         Key = 'vbr'; Label = 'VSA Backup & Replication'; Kickstart = 'vbr-ks.cfg'
@@ -2782,7 +2786,8 @@ function Invoke-StageA-Deploy {
         # apply the answer file, then detach + delete the secrets-bearing ISO. On a timeout, grab the
         # VM console as a PNG next to the staging area BEFORE any rollback removes the evidence.
         try {
-            Wait-ApplianceReady -Row $Row -Vm $vm -HmcPort $HmcPort -TimeoutSec $IsoReadyTimeoutSec -PollSec $IsoReadyPollSec | Out-Null
+            $readyTimeout = if ($vsa -and -not $script:BoundParams.ContainsKey('IsoReadyTimeoutSec')) { $script:VsaReadyTimeoutSec } else { $IsoReadyTimeoutSec }
+            Wait-ApplianceReady -Row $Row -Vm $vm -HmcPort $HmcPort -TimeoutSec $readyTimeout -PollSec $IsoReadyPollSec | Out-Null
             # VSA: the product installs its services after the console is up - wait for its own port too.
             if ($vsa) { Wait-VsaService -Row $Row -Product $vsa -TimeoutSec $IsoReadyTimeoutSec -PollSec $IsoReadyPollSec | Out-Null }
         }
