@@ -38,6 +38,10 @@
 - Software Appliance rows wait up to 2 hours for readiness (proxies: 30 minutes). Lab: the first full `vbr`
   install was healthy but at package 692 of 771 after 30 minutes; the proxy-sized timeout plus *Rollback on
   failure* deleted it. The unattended boot, Secure Boot and kickstart were confirmed by that console screenshot.
+- Deployment server: a run's per-run credential files and staged ISOs are removed when the run ends, even
+  with nobody watching the page (before: only when the page next asked for that run; lab: `vcenter.cred` left
+  behind). The server sweeps finished runs between requests (30 s), and at start it scrubs runs a restart
+  interrupted.
 - Wrong base ISO for the rows (lab: `vbr` rows run with the Infrastructure Appliance ISO): the script now
   says which ISO the role needs instead of a bare `xorriso failed (exit 5)`. The page preselects the
   matching ISO for the chosen VBR key and refuses a mismatched pick before the run starts.

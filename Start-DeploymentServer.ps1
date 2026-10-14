@@ -177,7 +177,11 @@ function Complete-Run {
     $dir = Join-Path $RunsDir $Id; $exitFile = Join-Path $dir 'exit.json'
     if (Test-Path $exitFile) { return }
     @{ exit = $Exit; cancelled = [bool]$Cancelled; ended = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content $exitFile
-    Get-ChildItem $dir -Filter '*.cred' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Clear-RunSecrets -Dir $dir
+}
+function Clear-RunSecrets {
+    param([string]$Dir)
+    Get-ChildItem $Dir -Filter '*.cred' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     $stg = Join-Path $dir 'staging'
     if (Test-Path $stg) {
         Get-ChildItem $stg -File -ErrorAction SilentlyContinue |
@@ -185,6 +189,15 @@ function Complete-Run {
             Remove-Item -Force -ErrorAction SilentlyContinue
         Get-ChildItem $stg -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '_build_*' -or $_.Name -like '_validate_*' } |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+function Invoke-RunSweep {
+    # Finalise every run whose process has ended, whether or not anyone is looking at the page. Before this,
+    # Complete-Run ran only when the page asked for a run's status, so a run that ended with nobody watching
+    # kept its per-run credential files until the next look (lab 2026-10-14: vcenter.cred left behind).
+    foreach ($id in @($script:Procs.Keys)) {
+        $p = $script:Procs[$id]
+        if ($p.HasExited) { Complete-Run -Id $id -Exit $p.ExitCode; [void]$script:Procs.Remove($id) }
     }
 }
 function Get-RunInfo {
@@ -468,10 +481,23 @@ $listener.Prefixes.Add($prefix)
 $listener.Start()
 Write-SrvLog "Deployment server listening on $prefix  (root=$Root, data=$DataDir, key=$SecretsKeyFile)" 'OK'
 if ($ListenAddress -notin @('127.0.0.1', 'localhost', '::1')) { Write-SrvLog "Listening on a non-loopback address WITHOUT TLS or authentication. Put nginx (TLS + auth) in front." 'WARN' }
+# Runs left without exit.json by a previous server process (restart / crash while they ran): no process is
+# left to wait for, so scrub their secrets now. They keep the state 'interrupted' (no exit.json is written).
+foreach ($d in @(Get-ChildItem $RunsDir -Directory -ErrorAction SilentlyContinue)) {
+    if (Test-Path (Join-Path $d.FullName 'exit.json')) { continue }
+    $left = @(Get-ChildItem $d.FullName -Filter '*.cred' -ErrorAction SilentlyContinue) + @(Get-ChildItem (Join-Path $d.FullName 'staging') -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq '.iso' -or $_.Name -in @('vbr_init.cfg', 'veeam-init.sh', 'veeam-init.service') })
+    if ($left.Count) { Clear-RunSecrets -Dir $d.FullName; Write-SrvLog "run $($d.Name): interrupted by a server restart - $($left.Count) per-run credential / staged file(s) removed" 'WARN' }
+}
 try {
+    # Wait for requests with a timeout instead of blocking forever, so finished runs are swept between requests.
+    $pending = $null
     while ($listener.IsListening) {
-        $ctx = $listener.GetContext()
-        try { Handle-Request $ctx } catch { try { Send-Json $ctx 500 @{ error = $_.Exception.Message } } catch { } ; Write-SrvLog "request failed: $($_.Exception.Message)" 'ERROR' }
+        if (-not $pending) { $pending = $listener.GetContextAsync() }
+        if ($pending.Wait(30000)) {
+            $ctx = $pending.Result; $pending = $null
+            try { Handle-Request $ctx } catch { try { Send-Json $ctx 500 @{ error = $_.Exception.Message } } catch { } ; Write-SrvLog "request failed: $($_.Exception.Message)" 'ERROR' }
+        }
+        Invoke-RunSweep
     }
 }
 finally { $listener.Stop(); Write-SrvLog 'stopped.' }
