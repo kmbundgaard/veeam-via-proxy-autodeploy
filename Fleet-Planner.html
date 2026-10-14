@@ -921,7 +921,7 @@
     if (!name) { el.textContent = ''; return; }
     if (!info) { el.textContent = 'No summary for this file (uploaded before summaries existed). Re-upload the .conf to get one.'; return; }
     const ntp = (info.ntp || []).join(', ') || '(none)';
-    el.textContent = `veeamadmin MFA ${info.mfa ? 'on' : 'off'} · Security Officer ${info.securityOfficer ? 'on' : 'off'} · NTP ${ntp}${info.ntpRunSync ? ' (sync at first boot)' : ''} · password ${info.passwordLength} chars`;
+    el.textContent = `veeamadmin MFA ${info.mfa ? 'on' : 'off'} · Security Officer ${info.securityOfficer ? 'on' + (info.recoveryToken ? ` (recovery token ${info.recoveryToken})` : '') : 'off'} · NTP ${ntp}${info.ntpRunSync ? ' (sync at first boot)' : ''} · password ${info.passwordLength} chars`;
   }
   function renderServerPanel() {
     const s = srv.status; if (!s) return;

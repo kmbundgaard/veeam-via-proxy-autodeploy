@@ -116,12 +116,18 @@ function Test-SettingsText {
     if ($adminPw -cin $examplePw) { $errors.Add('VEEAMADMIN_PASSWORD is still the example value - set your real veeamadmin password') }
     if ($soOn -and ((& $g 'VEEAMSO_PASSWORD') -cin $examplePw)) { $errors.Add('VEEAMSO_PASSWORD is still the example value') }
     if ($mfaOn -and ((& $g 'VEEAMADMIN_MFA_SECRET') -eq 'JBSWY3DPEHPK3PXP')) { $errors.Add('VEEAMADMIN_MFA_SECRET is still the example seed - generate a fresh one (Protect-DeploymentSecrets.ps1 -NewTotpSeed)') }
-    $ntp = @((& $g 'NTP_SERVERS') -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    # ',' or ';' like the deploy script (Get-ApplianceSecrets); the answer file gets ';'.
+    $ntp = @((& $g 'NTP_SERVERS') -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     if (-not $ntp.Count) { $errors.Add('NTP_SERVERS is missing') }
+    # The Security Officer's break-glass token: required when the SO is on (same rule as Test-ApplianceSecrets).
+    $soTok = & $g 'VEEAMSO_RECOVERY_TOKEN'
+    $soTokOk = $soTok -match '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+    if ($soOn -and -not $soTok)  { $errors.Add('VEEAMSO_RECOVERY_TOKEN is missing (needed with VEEAMSO_ENABLED = true) - create one with Protect-DeploymentSecrets.ps1 -NewRecoveryToken and keep it in your vault') }
+    elseif ($soOn -and -not $soTokOk) { $errors.Add('VEEAMSO_RECOVERY_TOKEN must be a GUID like 1A2B3C4D-1A2B-1A2B-1A2B-1A2B3C4D5E6F (Protect-DeploymentSecrets.ps1 -NewRecoveryToken)') }
     foreach ($n in $ntp) { if ($n -match '(^|\.)example\.(local|com|net|org)$') { $errors.Add("NTP_SERVERS still lists the example host '$n' - the appliance cannot resolve it and Initial Configuration fails") } }
     @{
         errors  = @($errors)
-        summary = [ordered]@{ mfa = $mfaOn; securityOfficer = $soOn; ntp = $ntp; ntpRunSync = ((& $g 'NTP_RUNSYNC' 'true') -eq 'true'); passwordLength = $adminPw.Length; uploaded = (Get-Date).ToString('o') }
+        summary = [ordered]@{ mfa = $mfaOn; securityOfficer = $soOn; recoveryToken = $(if (-not $soOn) { 'n/a' } elseif ($soTokOk) { 'set' } else { 'missing' }); ntp = $ntp; ntpRunSync = ((& $g 'NTP_RUNSYNC' 'true') -eq 'true'); passwordLength = $adminPw.Length; uploaded = (Get-Date).ToString('o') }
     }
 }
 function Get-SettingsInfo {

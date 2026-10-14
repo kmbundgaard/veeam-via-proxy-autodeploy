@@ -32,6 +32,9 @@
 - `Protect-DeploymentSecrets.ps1 -NewRecoveryToken` prints a Security Officer recovery token (GUID) for
   `VEEAMSO_RECOVERY_TOKEN`. START-HERE, the README and the example settings file now explain when it is
   needed (`VEEAMSO_ENABLED = true`) and that it belongs in a vault.
+- Deployment server, settings upload: refuses a file with the Security Officer on and no valid recovery
+  token (before: only the run's full check caught it), splits `NTP_SERVERS` on `,` as well as `;`, and the
+  page shows `recovery token set / missing` next to "Security Officer on".
 
 - DNS search domain is back: the `-PromptIso` console asks for it (default = the hostname's domain, `-` =
   none) and CSV modes take an optional column `dnssearch` (`,`-separated). Both become anaconda
