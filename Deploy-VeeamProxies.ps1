@@ -998,6 +998,8 @@ function Invoke-StageB-Register-Rest {
                                 "Fix DNS (New-ProxyDnsRecords.ps1 -UpdateExisting) or set CSV 'vbrname' to the IP. Not retried.") -f $regName, $fp, $Row.ip, $fpIp)
                     }
                 }
+                # The name was free a moment ago (find-before-add above), so whatever the VBR holds under it from here on is ours to roll back.
+                if ($script:Owned) { $script:Owned.VbrAdded = $true }
                 $res = Add-VbrRestLinuxHost -Name $regName -Fingerprint $fp -HandshakeCode $handshake -Description "$(Get-RoleLabel -Row $Row) $($Row.hostname) (autodeploy)"
                 if ($res.id) {
                     Write-Log "Add accepted (session $($res.id)); waiting up to ${RegisterTimeoutSec}s for the VBR to deploy components (an appliance OS upgrade may be included)..." 'INFO'
@@ -2794,6 +2796,7 @@ function Invoke-StageA-Deploy {
     $isoDs = Resolve-IsoDatastore -Row $Row
     $isoDsPath = $null
     if ($PSCmdlet.ShouldProcess($Row.hostname, "Upload ISO to datastore [$($isoDs.Name)]")) {
+        if ($script:Owned) { $script:Owned.IsoDatastore = $isoDs }   # before the copy: a half-written upload is ours too
         $isoDsPath = Copy-IsoToDatastore -IsoPath $IsoPath -Datastore $isoDs
         Write-Log "Uploaded ISO to $isoDsPath." 'OK'
     }
@@ -2830,6 +2833,7 @@ function Invoke-StageA-Deploy {
         if ($location)        { $newVmParams.Location        = $location }
         if ($HardwareVersion) { $newVmParams.HardwareVersion = $HardwareVersion }
         $vm = New-VM @newVmParams
+        if ($script:Owned) { $script:Owned.VmId = $vm.Id }
 
         # UEFI firmware + Secure Boot (Veeam requires Secure Boot ENABLED for the VIA). New-VM has
         # no -Firmware, so use a config spec. The repacked ISO only changes text config, so it
@@ -2908,6 +2912,7 @@ function Invoke-StageB-Register {
         # parameters for the certificate-based authentication." -ForceDeployerFingerprint skips the
         # interactive fingerprint dialog; a first pairing uses handshake code 000000.
         $code = Resolve-HandshakeCode -Row $Row
+        if ($script:Owned) { $script:Owned.VbrAdded = $true }
         Add-VBRLinux -Name $regName -UseCertificate -HandshakeCode $code -ForceDeployerFingerprint `
             -Description "$(Get-RoleLabel -Row $Row) $($Row.hostname) (autodeploy)" | Out-Null
         Write-Log "Added Linux host '$regName'." 'OK'
@@ -2951,25 +2956,99 @@ function Test-ProxyRegistered {
 # ---------------------------------------------------------------------------
 # Rollback / teardown
 # ---------------------------------------------------------------------------
-function Invoke-Rollback {
+function New-RowOwnership {
+    # What THIS run created for one row. Stage A and Stage B fill it in as they go; -RollbackOnFailure removes
+    # only what is recorded here. VmId (not the name) identifies the VM, because another run or a person can own
+    # a VM with the same name.
+    return [ordered]@{ VmId = $null; IsoDatastore = $null; StagedIso = $null; VbrAdded = $false }
+}
+
+function Remove-RowFromVbr {
     [CmdletBinding(SupportsShouldProcess = $true)]
-    param($Row, [switch]$IncludeVBR)
+    param($Row)
+    if ($RegisterVia -eq 'Rest') {
+        Remove-VbrRestHost -Row $Row
+    }
+    else {
+        $regName = Get-RegistrationName -Row $Row
+        $srv = Get-VBRServer -Name $regName -ErrorAction SilentlyContinue
+        if ($srv -and $PSCmdlet.ShouldProcess($regName, "Remove from VBR")) {
+            Remove-VBRServer -Server $srv -Confirm:$false
+            Write-Log "Removed '$regName' from VBR." 'OK'
+        }
+    }
+}
+
+function Get-ExistingTargetConflicts {
+    # Rows whose names are already taken: a VM in vCenter, or a managed server in the VBR. A fresh deploy can
+    # never take either over (-Replace does that on purpose), so the row would fail anyway - but only after the
+    # ISO build, the upload and a 20-minute install. Checked for all rows up front instead (lab 2026-10-14:
+    # stale 'Unavailable' objects for three proxies surfaced only at Stage B). Returns hostname -> reason.
+    param($Rows, [switch]$CheckVm, [switch]$CheckVbr)
+    $out = [ordered]@{}
+    foreach ($r in $Rows) {
+        $why = [System.Collections.Generic.List[string]]::new()
+        if ($CheckVm) {
+            $vm = Get-VM -Name $r.hostname -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($vm) { $why.Add(("a VM named '{0}' already exists in vCenter ({1}, folder '{2}')" -f $r.hostname, $vm.PowerState, $vm.Folder.Name)) }
+        }
+        if ($CheckVbr -and -not (Get-RowVsaProduct -Row $r)) {
+            $regName = Get-RegistrationName -Row $r
+            if ($RegisterVia -eq 'Rest') {
+                $hostId = Find-VbrRestManagedServer -Name $regName
+                if ($hostId) {
+                    $ms = Invoke-VbrRest -Method GET -Path ("/api/v1/backupInfrastructure/managedServers/{0}" -f [uri]::EscapeDataString($hostId))
+                    $st = if ($ms.PSObject.Properties['status']) { [string]$ms.status } else { 'unknown' }
+                    $why.Add(("'{0}' already exists in the VBR as a managed server (status {1})" -f $regName, $st))
+                }
+            }
+            elseif (Get-VBRServer -Name $regName -ErrorAction SilentlyContinue) {
+                $why.Add(("'{0}' already exists in the VBR as a managed server" -f $regName))
+            }
+        }
+        if ($why.Count) { $out[[string]$r.hostname] = ($why -join '; ') }
+    }
+    return $out
+}
+
+function Invoke-Rollback {
+    # Two callers. -Rollback (the operator asked to tear these rows down) removes whatever carries the row's
+    # names. -RollbackOnFailure passes -Owned and removes ONLY what this run created for the row. Lab 2026-10-14:
+    # a by-name cleanup after "A VM named ... already exists" deleted another run's healthy appliances, their VBR
+    # objects and the datastore ISO a running install was booting from. Returns $true when it removed something
+    # (-Owned only).
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param($Row, [switch]$IncludeVBR, [System.Collections.IDictionary]$Owned)
+
+    if ($Owned) {
+        if (-not ($Owned.VmId -or $Owned.IsoDatastore -or $Owned.StagedIso -or $Owned.VbrAdded)) {
+            Write-Log "Rollback: this run created nothing for '$($Row.hostname)' - nothing removed (an existing VM or VBR object with that name is left alone)." 'INFO'
+            return $false
+        }
+        Write-Log "Rollback: removing what this run created for '$($Row.hostname)'" 'WARN'
+        if ($IncludeVBR -and $Owned.VbrAdded) { Remove-RowFromVbr -Row $Row }
+        if ($Owned.VmId) {
+            $vm = Get-VM -Id $Owned.VmId -ErrorAction SilentlyContinue
+            if ($vm -and $PSCmdlet.ShouldProcess($Row.hostname, "Power off + delete the VM this run created ($($Owned.VmId))")) {
+                if ($vm.PowerState -eq 'PoweredOn') { Stop-VM -VM $vm -Confirm:$false | Out-Null }
+                Remove-VM -VM $vm -DeletePermanently -Confirm:$false
+                Write-Log "Deleted VM '$($Row.hostname)' ($($Owned.VmId))." 'OK'
+            }
+        }
+        if ($Owned.IsoDatastore) {
+            try { Remove-IsoFromDatastore -Hostname $Row.hostname -Datastore $Owned.IsoDatastore }
+            catch { Write-Log "Rollback: datastore ISO cleanup skipped ($($_.Exception.Message))." 'WARN' }
+        }
+        if ($Owned.StagedIso -and (Test-Path -LiteralPath $Owned.StagedIso) -and $PSCmdlet.ShouldProcess($Row.hostname, "Remove staged ISO")) {
+            Remove-Item -LiteralPath $Owned.StagedIso -Force -ErrorAction SilentlyContinue
+            Write-Log "Removed staged ISO '$($Owned.StagedIso)'." 'OK'
+        }
+        return $true
+    }
 
     Write-Log "Rollback: tearing down '$($Row.hostname)'" 'WARN'
 
-    if ($IncludeVBR) {
-        if ($RegisterVia -eq 'Rest') {
-            Remove-VbrRestHost -Row $Row
-        }
-        else {
-            $regName = Get-RegistrationName -Row $Row
-            $srv = Get-VBRServer -Name $regName -ErrorAction SilentlyContinue
-            if ($srv -and $PSCmdlet.ShouldProcess($regName, "Remove from VBR")) {
-                Remove-VBRServer -Server $srv -Confirm:$false
-                Write-Log "Removed '$regName' from VBR." 'OK'
-            }
-        }
-    }
+    if ($IncludeVBR) { Remove-RowFromVbr -Row $Row }
 
     $vm = Get-VM -Name $Row.hostname -ErrorAction SilentlyContinue
     if ($vm -and $PSCmdlet.ShouldProcess($Row.hostname, "Power off + delete VM")) {
@@ -3090,6 +3169,8 @@ $report = [System.Collections.Generic.List[object]]::new()
 $vcConn = $null
 $vbrConn = $null
 $vbrConnected = $false   # true once connected to VBR (either REST or cmdlet); gates rollback
+$script:Owned = $null     # per-row record of what this run created (New-RowOwnership); limits -RollbackOnFailure
+$script:PreCheck = [ordered]@{}   # hostname -> why its name is already taken (Get-ExistingTargetConflicts)
 
 try {
     Write-Log "=== Veeam v13.1 Proxy Mass-Deployment ===" 'STEP'
@@ -3275,6 +3356,44 @@ try {
         }
     }
 
+    # --- Pre-check: names already taken in vCenter / the VBR. Those rows are skipped before anything is built,
+    #     and nothing is created or removed for them. -Replace takes the names over on purpose. ---
+    if ($needDeploy -and -not $Replace -and -not $ValidateOnly) {   # read-only, so -WhatIf shows it too
+        $script:PreCheck = Get-ExistingTargetConflicts -Rows $rows -CheckVm -CheckVbr:($needRegister -and $vbrConnected)
+        foreach ($k in $script:PreCheck.Keys) {
+            Write-Log ("Pre-check '{0}': {1}. The row is skipped: nothing is created or removed for it. Remove the leftover first, or rerun the row with -Replace." -f $k, $script:PreCheck[$k]) 'ERROR'
+        }
+        if (-not $script:PreCheck.Count) { Write-Log "Pre-check passed: no VM or VBR object uses the name of any of the $($rows.Count) row(s)." 'OK' }
+    }
+    # ValidateOnly: the same check, read-only, when credentials were given (never prompts; skipped without them).
+    if ($ValidateOnly -and -not $Replace) {
+        $vcOk = $false; $vbrOk = $false
+        if (-not $SkipDeploy -and $vCenterServer -and ($vCenterCredential -or $vCenterCredentialFile)) {
+            try {
+                Initialize-PowerCLI
+                if (-not $vCenterCredential) { $vCenterCredential = Read-CredentialFile -Path $vCenterCredentialFile -Purpose 'vCenter credential file' }
+                $vcConn = Connect-VIServer -Server $vCenterServer -Credential $vCenterCredential
+                $vcOk = $true
+            }
+            catch { Write-Log "ValidateOnly: could not connect to vCenter $vCenterServer for the name check - $($_.Exception.Message)" 'WARN' }
+        }
+        if (-not $SkipRegister -and -not $script:VsaRun -and $RegisterVia -eq 'Rest' -and $VBRServer -and ($VBRCredential -or $VBRCredentialFile)) {
+            try {
+                if (-not $VBRCredential) { $VBRCredential = Read-CredentialFile -Path $VBRCredentialFile -Purpose 'VBR credential file' }
+                Connect-VbrRest
+                $vbrOk = $true
+            }
+            catch { Write-Log "ValidateOnly: could not connect to VBR $VBRServer for the name check - $($_.Exception.Message)" 'WARN' }
+        }
+        if ($vcOk -or $vbrOk) {
+            $script:PreCheck = Get-ExistingTargetConflicts -Rows $rows -CheckVm:$vcOk -CheckVbr:$vbrOk
+            $where = (@($(if ($vcOk) { 'vCenter' }), $(if ($vbrOk) { 'the VBR' })) | Where-Object { $_ }) -join ' and '
+            if ($script:PreCheck.Count) { Write-Log "ValidateOnly: $($script:PreCheck.Count) row(s) use a name that is already taken in $where - a deploy would skip them (see below)." 'WARN' }
+            else { Write-Log "ValidateOnly: no VM or VBR object uses the name of any row (checked in $where)." 'OK' }
+        }
+        else { Write-Log "ValidateOnly: no vCenter / VBR credentials given - existing VMs and VBR objects were not checked." 'INFO' }
+    }
+
     # --- Prepare the shared ISO workspace once (rendered answer file + first-boot artifacts) ---
     $script:IsoWorkspace = $null
     if ($needDeploy -or $IsoOnly) {
@@ -3336,6 +3455,7 @@ try {
             vbr = $row.vbr; hostname = $row.hostname; ip = $row.ip
             deploy = 'skipped'; register = 'skipped'; validate = 'n/a'; error = ''
         }
+        $script:Owned = New-RowOwnership
         try {
             if ($Rollback) {
                 Invoke-Rollback -Row $row -IncludeVBR:$vbrConnected
@@ -3350,6 +3470,13 @@ try {
                 $entry.validate = if (Get-RowVsaProduct -Row $row) { "would build ISO ($(Get-RowKickstart -Row $row)) + create UEFI VM ($hw) on $($row.cluster)/$($row.datastore) as $as; no registration" }
                                   else { "would build ISO + create UEFI VM ($hw) on $($row.cluster)/$($row.datastore); register to $($row.vbr) via $RegisterVia as $as" }
                 Write-Log "VALIDATE '$($row.hostname)': $($entry.validate)" 'INFO'
+                if ($script:PreCheck.Contains([string]$row.hostname)) {
+                    $entry.error = "Pre-check: $($script:PreCheck[[string]$row.hostname]) - a deploy would skip this row (remove the leftover, or use -Replace)."
+                    Write-Log "VALIDATE '$($row.hostname)': $($entry.error)" 'WARN'
+                }
+            }
+            elseif ($script:PreCheck.Contains([string]$row.hostname)) {
+                throw "Pre-check: $($script:PreCheck[[string]$row.hostname]) - row skipped, nothing created or removed. Remove the leftover first, or rerun the row with -Replace."
             }
             else {
                 # --- Replace: capture + release BEFORE the new appliance is built ---
@@ -3368,6 +3495,7 @@ try {
                 }
                 if ($needDeploy) {
                     $isoPath = New-ApplianceIso -Row $row -BaseIso $BaseIso -OutDir $IsoStagingDir -SharedArtifacts $script:IsoWorkspace
+                    $script:Owned.StagedIso = $isoPath
                     Invoke-StageA-Deploy -Row $row -IsoPath $isoPath
                     $entry.deploy = 'ok'
                     $vsaP = Get-RowVsaProduct -Row $row
@@ -3417,8 +3545,11 @@ try {
                     Write-Log "RollbackOnFailure: deploy of '$($row.hostname)' succeeded, only registration failed - VM KEPT. Fix the cause and rerun with -SkipDeploy." 'WARN'
                 }
                 else {
-                    Write-Log "RollbackOnFailure: cleaning up '$($row.hostname)'..." 'WARN'
-                    try { Invoke-Rollback -Row $row -IncludeVBR:$vbrConnected; $entry.error += ' (rolled back)' }
+                    Write-Log "RollbackOnFailure: cleaning up what this run created for '$($row.hostname)'..." 'WARN'
+                    try {
+                        $removed = @(Invoke-Rollback -Row $row -IncludeVBR:$vbrConnected -Owned $script:Owned)[-1] -eq $true   # last item: helpers may emit output
+                        $entry.error += $(if ($removed) { ' (rolled back)' } else { ' (nothing created, nothing removed)' })
+                    }
                     catch { Write-Log "Cleanup of '$($row.hostname)' also failed: $($_.Exception.Message)" 'ERROR' }
                 }
             }
