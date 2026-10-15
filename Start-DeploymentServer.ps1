@@ -236,6 +236,37 @@ function Get-RunLog { param([string]$Id)
     foreach ($f in @('run.log', 'run.err')) { $p = Join-Path $dir $f; if ((Test-Path $p) -and (Get-Item $p).Length -gt 0) { if ($f -eq 'run.err') { $t += "`n--- stderr ---`n" }; $t += Get-Content $p -Raw } }
     return $t }
 
+# Modes that create or delete VMs / VBR objects. Validate, WhatIf and the ISO builds change nothing and may overlap.
+$script:ChangingModes = @('DeployOnly', 'Full', 'RegisterOnly', 'Rollback')
+function Get-RunTargets {
+    # Host names and IPs of the rows a run handles (the deploy script only takes rows whose 'vbr' matches).
+    param([string]$CsvText, [string]$Vbr)
+    $rows = @(ConvertFrom-Csv $CsvText | Where-Object { $Vbr -eq '*' -or ([string]$_.vbr).Trim() -eq $Vbr })
+    return @($rows | ForEach-Object { ([string]$_.hostname).Trim().ToLowerInvariant(); ([string]$_.ip).Trim() } | Where-Object { $_ } | Sort-Object -Unique)
+}
+function Assert-NoConflictingRun {
+    # Two runs that create or delete the same appliances destroy each other's work. Lab 2026-10-14: a sequential
+    # and a parallel Full run of the same four proxies started 8 minutes apart; each one's rollback deleted the
+    # VMs and VBR objects the other had just built. A changing run may not share a host name or IP with a
+    # changing run that is still running.
+    param([string]$Mode, [string]$CsvText, [string]$Vbr)
+    if ($Mode -notin $script:ChangingModes) { return }
+    $mine = Get-RunTargets -CsvText $CsvText -Vbr $Vbr
+    foreach ($id in @($script:Procs.Keys)) {
+        if ($script:Procs[$id].HasExited) { continue }
+        $dir = Join-Path $RunsDir $id
+        $j = Join-Path $dir 'run.json'; $c = Join-Path $dir 'proxies.csv'
+        if (-not (Test-Path $j) -or -not (Test-Path $c)) { continue }
+        $info = Get-Content $j -Raw | ConvertFrom-Json
+        if ([string]$info.mode -notin $script:ChangingModes) { continue }
+        $shared = @((Get-RunTargets -CsvText (Get-Content $c -Raw) -Vbr ([string]$info.vbr)) | Where-Object { $_ -in $mine })
+        if ($shared.Count) {
+            throw ("Run {0} ({1}, started {2}) is still running and handles {3}. Two runs on the same appliances undo each other's work: wait for it to finish, or cancel it first." -f
+                   $id, $info.mode, $info.started, ($shared -join ', '))
+        }
+    }
+}
+
 function New-Run {
     param($Req)
     $mode = [string](Get-Field $Req 'mode')
@@ -243,6 +274,8 @@ function New-Run {
     $isoMode      = $mode -like 'Iso*'   # build ISO(s) + VM build sheet only: no vCenter, no VBR
     if (-not (Get-Field $Req 'csv')) { throw 'No CSV content.' }
     if (-not (Get-Field $Req 'vbr') -or ([string](Get-Field $Req 'vbr')) -notmatch '^[A-Za-z0-9._-]+$') { throw 'A VBR key is required.' }
+    Invoke-RunSweep   # finalise runs that ended since the last request, so they do not count as running
+    Assert-NoConflictingRun -Mode $mode -CsvText ([string](Get-Field $Req 'csv')) -Vbr ([string](Get-Field $Req 'vbr'))
     $needDeploy   = $mode -in @('WhatIf', 'DeployOnly', 'Full')
     $needRegister = $mode -in @('WhatIf', 'Full', 'RegisterOnly')
     $needVc       = $mode -in @('WhatIf', 'DeployOnly', 'Full', 'Rollback')
@@ -294,6 +327,19 @@ function New-Run {
             $a.Add("-VBRCredentialFile $(& $q (Join-Path $dir 'vbr.cred'))")
         } else { throw 'VBR user and password are required for this mode (the server cannot prompt).' }
         if ((Get-Field $Req 'vbrServer.mfaFile')) { if (([string](Get-Field $Req 'vbrServer.mfaFile')) -notmatch $SafeName) { throw 'Bad MFA file name.' }; $a.Add("-VBRMfaSecretFile $(& $q (Join-Path $SecretsDir (Get-Field $Req 'vbrServer.mfaFile')))") }
+    }
+    # Validate: the check for VMs / VBR objects that already use the rows' names is optional and read-only -
+    # pass the credentials only when the form supplied them (the deploy script never prompts in this mode).
+    if ($mode -eq 'Validate') {
+        if ((Get-Field $Req 'vcenter.server') -and (Get-Field $Req 'vcenter.user') -and (Get-Field $Req 'vcenter.password')) {
+            Write-SecretFile -Path (Join-Path $dir 'vcenter.cred') -Text ("{0}`n{1}`n" -f (Get-Field $Req 'vcenter.user'), (Get-Field $Req 'vcenter.password'))
+            $a.Add("-vCenterServer $(& $q (Get-Field $Req 'vcenter.server'))"); $a.Add("-vCenterCredentialFile $(& $q (Join-Path $dir 'vcenter.cred'))")
+        }
+        if (-not $vsa -and (Get-Field $Req 'vbrServer.server') -and (Get-Field $Req 'vbrServer.user') -and (Get-Field $Req 'vbrServer.password')) {
+            Write-SecretFile -Path (Join-Path $dir 'vbr.cred') -Text ("{0}`n{1}`n" -f (Get-Field $Req 'vbrServer.user'), (Get-Field $Req 'vbrServer.password'))
+            $a.Add("-VBRServer $(& $q (Get-Field $Req 'vbrServer.server'))"); $a.Add("-VBRCredentialFile $(& $q (Join-Path $dir 'vbr.cred'))")
+            if ((Get-Field $Req 'vbrServer.mfaFile')) { if (([string](Get-Field $Req 'vbrServer.mfaFile')) -notmatch $SafeName) { throw 'Bad MFA file name.' }; $a.Add("-VBRMfaSecretFile $(& $q (Join-Path $SecretsDir (Get-Field $Req 'vbrServer.mfaFile')))") }
+        }
     }
     if (-not $vsa -and (Get-Field $Req 'transportMode') -and (Get-Field $Req 'transportMode') -ne 'Auto') { if (([string](Get-Field $Req 'transportMode')) -notin @('HotAdd', 'Nbd', 'DirectStorageAccess')) { throw 'Bad transport mode.' }; $a.Add("-TransportMode $((Get-Field $Req 'transportMode'))") }
     if (-not $vsa -and (Get-Field $Req 'applianceRole') -and (Get-Field $Req 'applianceRole') -ne 'InfrastructureServerIscsi') { if (([string](Get-Field $Req 'applianceRole')) -notin @('InfrastructureServer', 'None')) { throw 'Bad appliance role.' }; $a.Add("-ApplianceRole $((Get-Field $Req 'applianceRole'))") }
