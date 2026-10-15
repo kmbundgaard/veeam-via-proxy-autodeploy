@@ -38,6 +38,13 @@ changes in `CHANGELOG.md`.
 - **Idempotency.** Stage B does find-before-add for both the managed server and the proxy. Keep it
   that way so reruns never create duplicates.
 - **`-WhatIf` must stay honest.** Every state-changing action goes through `ShouldProcess`.
+- **Automatic cleanup removes only what this run created.** `-RollbackOnFailure` acts on the row's
+  `$script:Owned` record (`New-RowOwnership`: VM id, datastore ISO, staged ISO, VBR add sent); never
+  look resources up by name in that path. Any new resource a run creates gets recorded there right
+  where it is created. Only the explicit `-Rollback` tears down by name. (2026-10-14: a by-name rollback
+  deleted a concurrent run's healthy appliances.) Taken names are caught by `Get-ExistingTargetConflicts`
+  before anything is built, and the deployment server refuses overlapping state-changing runs
+  (`Assert-NoConflictingRun`). Keep both.
 
 ## Facts verified against real systems (2026-09-24) — do not "correct" these from memory
 

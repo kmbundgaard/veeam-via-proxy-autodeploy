@@ -53,7 +53,9 @@ any online service at run time.
 | Veeam PowerShell *(cmdlet path only)* | Install the VBR console on a Windows host. The default REST path avoids this. |
 
 `-ValidateOnly` is the offline smoke test: it needs no vCenter, no VBR and, without `-BaseIso`,
-not even xorriso.
+not even xorriso. Given vCenter and/or VBR credential files (or the deployment server's Validate with
+credentials filled in), it also checks, read-only, that no VM and no VBR managed server already uses a
+row's name. It never prompts for them.
 
 ---
 
@@ -384,8 +386,8 @@ Things to check (from the Data Domain and StoreOnce pages of the user guide):
 | `-SingleIso` | off | With `-IsoOnly`: one ISO for all rows, the node is picked in the boot menu (§4c). |
 | `-PromptIso` | off | With `-IsoOnly`: one generic ISO that asks for hostname, NIC 1 and NIC 2 at install time; `-CsvPath` optional (first row = default netmask / gateway / DNS / dnssearch) (§4c). |
 | `-IsoOutDir` | `<CSV dir>/iso-out` | Output of `-IsoOnly`. Must differ from `-IsoStagingDir`. |
-| `-ValidateOnly` | off | Offline checks: CSV, secrets rules, template rendering, and (with `-BaseIso`) a real extract + patch dry run into `<staging>/_validate_<host>/`. |
-| `-Rollback` / `-RollbackOnFailure` | off | Teardown all rows / auto-clean a failed row. |
+| `-ValidateOnly` | off | Offline checks: CSV, secrets rules, template rendering, and (with `-BaseIso`) a real extract + patch dry run into `<staging>/_validate_<host>/`. With `-vCenterCredentialFile` / `-VBRCredentialFile` also the read-only name pre-check (existing VMs / VBR managed servers). |
+| `-Rollback` / `-RollbackOnFailure` | off | `-Rollback`: tear down all rows **by name** (VM, VBR managed server, datastore ISO). `-RollbackOnFailure`: clean up a failed row, removing **only what this run created** for it (the VM by its id, its datastore ISO, a VBR add it sent). A VM or VBR object that already existed is never touched. |
 | `-Parallel` | `1` | Deploy up to N rows at the same time (1–16), §4f. Each row runs as its own worker process; one merged report. Not with `-Replace` or `gatewayrepo` rows. |
 | `-ParallelStaggerSec` | `45` | Seconds between the starts of the first N workers (spreads ISO uploads and logins). |
 | `-Replace` | off | Redeploy over a proxy that already exists in VBR and keep its job assignments: capture the job lists that pin it, remove it, move the old VM aside, deploy + register the new appliance, re-pin (§4b). REST path only. |
@@ -731,6 +733,10 @@ How it works:
   wait up to 30 s for a fresh code).
 - **Output:** every log line carries the row's host name (`[prx-vbr01-07] ...`). At the end there is one
   merged run report; the exit code is 2 when any row failed.
+- **One run per appliance.** Never start a second run for the same rows while one is running: each run's
+  pre-check and rollback would act on the other's VMs (lab 2026-10-14, before 1.3.1: a sequential and a
+  parallel run of the same four proxies deleted each other's appliances). The deployment server refuses a
+  Full / DeployOnly / RegisterOnly / Rollback run that shares a host name or IP with one still running.
 
 Limits and sizing:
 
@@ -820,6 +826,61 @@ neither (verified against a lab VBR with a non-MFA service account).
 This is the **VBR** account's seed. It is unrelated to the appliance `veeamadmin`/`veeamso`
 MFA seeds in `-ApplianceSecretsFile`.
 
+**Which account to use.** Two ways work:
+
+1. **A dedicated account without MFA (recommended).** In the VBR console (*Users and Roles*), mark the
+   account the toolkit uses as a service account so that MFA does not apply to it, give it a long random
+   password and use it for nothing else. No seed is needed; in Fleet-Planner leave **VBR MFA seed file** at
+   *(none)*. Runs show up under their own name in the VBR audit trail, and no seed sits on the deploy host.
+2. **An account with MFA.** Supply its seed as below. Whoever holds the seed file *and* the key can generate
+   valid codes for that account, which weakens what MFA protects.
+
+Registration adds managed servers and assigns the proxy role, which normally needs the *Veeam Backup
+Administrator* role on that VBR. *(Service-account option and role from field experience; confirm them
+against the VBR 13.1 user guide for your build.)*
+
+**Getting the seed.** It is the Base32 secret behind the QR code VBR shows when MFA is set up for the
+account (the "enter the key manually" text). If the account is enrolled and the key was not kept, reset
+MFA for the user in VBR and enrol again, noting the key. Add the same key to an authenticator app so a person
+can still sign in. After a later MFA reset the stored seed stops working: runs then fail at the token call.
+
+**Command line.** Store the seed in a file (first non-comment line) and encrypt it (§1b):
+
+```bash
+pwsh -File ./Protect-DeploymentSecrets.ps1 -Encrypt -KeyFile /secure/vbr01.key -In vbr01-svc.mfa.txt -Out vbr01-svc.mfa.enc
+pwsh -File ./Deploy-VeeamProxies.ps1 ... -VBRCredentialFile ./vbr01.cred -VBRMfaSecretFile ./vbr01-svc.mfa.enc -SecretsKeyFile /secure/vbr01.key
+```
+
+**Deployment server (§1c).** The page cannot upload seed files: put one into `<DataDir>/secrets/`
+yourself, encrypted with the server's key. The file name must contain **`.mfa`**: that is how the server
+tells it from the appliance settings files and lists it under **VBR MFA seed file** in the Run panel (and
+in the per-VBR table, which preselects it). Example for `vbr01`, as the service user, without the clear-text
+seed ever touching the disk or the shell history:
+
+```bash
+cd /opt/autodeploy && umask 077
+read -rs SEED && printf '%s\n' "$SEED" > /dev/shm/vbr01.mfa.txt && unset SEED
+pwsh -File ./Protect-DeploymentSecrets.ps1 -Encrypt -KeyFile server-data/secrets/server.key \
+  -In /dev/shm/vbr01.mfa.txt -Out server-data/secrets/vbr01.mfa.enc
+shred -u /dev/shm/vbr01.mfa.txt
+pwsh -File ./Protect-DeploymentSecrets.ps1 -Show -KeyFile server-data/secrets/server.key -In server-data/secrets/vbr01.mfa.enc
+```
+
+Then reload the page, pick the file, enter the MFA account as **VBR user**, and test with **What-if**: the
+log must show `Authenticated to VBR REST https://<vbr>:9419`.
+
+What is in the server's `secrets/` folder:
+
+| File | Holds |
+|------|-------|
+| `server.key` | Only the random key that encrypts / decrypts the files below - no password, no seed. Owner-only; never copy it off the server. |
+| `*.enc` (the **Settings file**) | The *appliances'* accounts: veeamadmin password and MFA seed, Security Officer, NTP. |
+| `*.mfa*` (optional) | The TOTP seed of the *VBR account* the toolkit logs in with. |
+| `runs/<id>/vcenter.cred`, `vbr.cred` (in the run folder) | The vCenter / VBR user and password of one run, encrypted; deleted when the run ends. |
+
+With `-Parallel`, all workers log in with the same account; they share a lock file so that no two of them
+use the same 30-second code (§4f).
+
 ---
 
 ## 6b. Pairing / handshake code
@@ -839,7 +900,9 @@ row's `handshakecode` column.
 ## 7. Run report
 
 Every run writes a per-row CSV (`deploy` / `register` / `validate` / `error`) next to the input
-CSV, or at `-ReportPath`. `-RollbackOnFailure` appends `(rolled back)` to a cleaned-up row.
+CSV, or at `-ReportPath`. `-RollbackOnFailure` appends `(rolled back)` to a row it cleaned up, or
+`(nothing created, nothing removed)` when the row failed before this run created anything (for example a
+pre-check failure).
 
 ---
 
@@ -870,7 +933,10 @@ CSV, or at `-ReportPath`. `-RollbackOnFailure` appends `(rolled back)` to a clea
 | Add session runs 15+ minutes, log shows "Appliance OS upgrade is required" | The appliance ISO build is older than the VBR, so the VBR upgrades it during the add and restarts it. Normal; covered by `-RegisterTimeoutSec`. Use the ISO matching the VBR build to avoid it at fleet scale. |
 | `Veeam.Backup.PowerShell module not found` | `-RegisterVia Cmdlet` needs the VBR console on a Windows host. Use the REST path. |
 | Deploy lands on the wrong datastore | Set `datastore` per row; SDRS cluster names are auto-detected. |
-| `A VM named '<host>' already exists` | Stage A refuses to overwrite; rename or `-Rollback` the old one. |
+| `Pre-check '<host>': a VM named '<host>' already exists in vCenter` and/or `... already exists in the VBR as a managed server (status ...)` | The name is taken by a leftover (an earlier run, a by-hand VM, a stale VBR object). The row is skipped before anything is built, and nothing is created or removed for it; the other rows carry on. Delete the leftover (or `-Rollback` that row), or redeploy over it with `-Replace`. A `-ValidateOnly` with credential files shows the same list without deploying. |
+| `A VM named '<host>' already exists` (from Stage A, without a pre-check line) | Someone created the VM after the run's pre-check. Stage A refuses to overwrite; since 1.3.1 the rollback leaves that VM alone. |
+| Deployment server: `Run <id> (...) is still running and handles <names>` | Another state-changing run is working on the same host names or IPs. Wait for it, or cancel it on the page, then start again. Validate and WhatIf runs are never blocked. |
+| VM console still shows the **Initial Configuration Wizard / License** page while the run log shows `ready`, `Add accepted` and `Managed server ... present` | Seen live 2026-10-15 on one of four appliances of a parallel run: the answer file had been applied and the VBR paired the appliance; the console page did not refresh. Go by the run log and the VBR. Do **not** press Accept on the console during a run. |
 | Duplicate hostname error at load | Hostnames must be unique across the network. |
 
 ---

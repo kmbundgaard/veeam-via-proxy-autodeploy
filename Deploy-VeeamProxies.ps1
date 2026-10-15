@@ -3366,9 +3366,10 @@ try {
         if (-not $script:PreCheck.Count) { Write-Log "Pre-check passed: no VM or VBR object uses the name of any of the $($rows.Count) row(s)." 'OK' }
     }
     # ValidateOnly: the same check, read-only, when credentials were given (never prompts; skipped without them).
-    if ($ValidateOnly -and -not $Replace) {
+    # Only for a deploying selection, as in a real run: -SkipDeploy registers existing appliances on purpose.
+    if ($ValidateOnly -and -not $Replace -and -not $SkipDeploy) {
         $vcOk = $false; $vbrOk = $false
-        if (-not $SkipDeploy -and $vCenterServer -and ($vCenterCredential -or $vCenterCredentialFile)) {
+        if ($vCenterServer -and ($vCenterCredential -or $vCenterCredentialFile)) {
             try {
                 Initialize-PowerCLI
                 if (-not $vCenterCredential) { $vCenterCredential = Read-CredentialFile -Path $vCenterCredentialFile -Purpose 'vCenter credential file' }

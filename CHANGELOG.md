@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.3.1 - 2026-10-15
+
+Fixes for the lab incident of 2026-10-14. A sequential Full run and a `-Parallel 4` Full run of the same
+four proxies were started 8 minutes apart on the deployment server. Each run hit "A VM named ... already
+exists" for the other run's VMs, and `-RollbackOnFailure` then deleted, by name, that other run's VMs (three
+of them healthy, finished installs), their VBR managed servers and the datastore ISO a running install was
+booting from. Three rows had also waited 20 minutes to install, only to fail at Stage B on stale
+`Unavailable` VBR objects.
+
+- **`-RollbackOnFailure` removes only what this run created.** Each row records the VM it created (by VM id,
+  not name), the datastore ISO it uploaded, the staged ISO and whether it sent the VBR add (the name was
+  confirmed free just before). A row that fails before creating anything removes nothing and its report
+  says `(nothing created, nothing removed)`. `-Rollback` (explicit teardown) still works by name.
+  A `-SkipDeploy` rerun whose registration fails no longer deletes the existing VM.
+- **Pre-check of taken names, before any ISO is built:** for a deploying run without `-Replace`, every row is
+  checked for an existing VM in vCenter and an existing VBR managed server (any status). Those rows are skipped
+  and nothing is created or removed for them; the other rows carry on. Runs under `-WhatIf` too.
+- **`-ValidateOnly` runs the same check, read-only,** when `-vCenterCredentialFile` and/or `-VBRCredentialFile`
+  are given (never prompts; skipped for `-SkipDeploy`, where existing appliances are expected). Rows with a taken
+  name are reported as failed (exit 2). The deployment server's Validate passes the vCenter / VBR credentials
+  when the form has them filled in.
+- **Deployment server: one run per appliance.** A Full / DeployOnly / RegisterOnly / Rollback run is refused
+  while another such run that shares a host name or IP is still running (`Run <id> ... is still running and
+  handles ...`). Validate, WhatIf and the ISO builds are never blocked.
+- Lab (2026-10-15): the first clean `-Parallel 4` Full run (prx-01..04 on vbr02) deployed, registered and
+  assigned the proxy role on all four in 40 minutes. One console kept showing the Initial Configuration Wizard
+  although the appliance was configured and paired (README troubleshooting). 1.3.1 itself: 21 mock tests
+  of the rollback / pre-check / server-lock logic, and a live read-only `-ValidateOnly` against the lab vCenter
+  and VBR that flagged the four existing proxies. **A failing deploy with 1.3.1 has not yet been run live.**
+
 ## 1.3.0 - 2026-10-14
 
 - **Veeam Software Appliance (VSA) deployment:** CSV `role` `vbr` (Veeam Backup & Replication server) or
