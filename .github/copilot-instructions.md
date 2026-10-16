@@ -95,7 +95,9 @@ changes in `CHANGELOG.md`.
   whatever the console-password option does (`PasswordAuthentication no`, `PermitRootLogin no`,
   `AllowUsers deploy`, `X11Forwarding no` in `sshd_config.d/10-autodeploy.conf`, named 10-* so it
   beats Rocky's `50-redhat.conf`); firewall = SSH only; SELinux enforcing; the web listener stays on
-  127.0.0.1. Do not loosen these for convenience.
+  127.0.0.1. Do not loosen these for convenience. The only sanctioned LAN exposure is nginx with TLS **and
+  client-certificate authentication** in front (`deploy-server/enable-https-client-cert.sh`, opens `https` only);
+  never bind the listener itself to a LAN address and never put nginx in front without client certificates.
 - Rocky kickstart (`deploy-server/ks.cfg.template`): never put `net.ifnames=0` in `bootloader
   --append`. The installer boots without it and writes the static profile for `ens192`; renaming
   the NIC to `eth0` afterwards makes NetworkManager fall back to DHCP.

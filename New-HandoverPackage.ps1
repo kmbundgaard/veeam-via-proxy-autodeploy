@@ -57,6 +57,7 @@ $ship = @(
     'templates/veeam-init.sh.template'
     'templates/veeam-init.service'
     'deploy-server/ks.cfg.template'
+    'deploy-server/enable-https-client-cert.sh'
 )
 $internal = @('CLAUDE.md', '.github/copilot-instructions.md')
 $files = if ($IncludeInternalDocs) { $ship + $internal } else { $ship }
