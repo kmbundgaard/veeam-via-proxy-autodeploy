@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.2 - unreleased
+
+- **Optional HTTPS on the LAN with client-certificate authentication** for the deployment server:
+  `deploy-server/enable-https-client-cert.sh`. nginx terminates TLS on 443 and only lets through a browser that
+  presents a client certificate from your CA. The server itself stays on `127.0.0.1:8080`, and the firewall
+  opens `https` only.
+  - `--make-csr` creates the server's private key on the server itself; the key never leaves it.
+  - The script sets the SELinux boolean `httpd_can_network_connect` and logs the client's certificate DN for
+    every request.
+  - The README (section 1c) has the private-CA, server-certificate and client-certificate (`.p12`) steps.
+  - The script is part of the hand-out list.
+  - nginx comes from Rocky AppStream. The server ISO doesn't include it yet: on a dark site, install it from
+    your own repository.
+  - A rebuild from the ISO doesn't keep this setup. Run the steps again after a rebuild.
+  - Lab (2026-10-16): without a client certificate the answer is HTTP 400; with one, the page and the API work.
+
 ## 1.3.1 - 2026-10-15
 
 Fixes for the lab incident of 2026-10-14. A sequential Full run and a `-Parallel 4` Full run of the same
