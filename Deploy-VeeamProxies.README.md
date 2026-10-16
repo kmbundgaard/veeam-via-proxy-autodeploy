@@ -221,6 +221,66 @@ design: disk encryption (use vSphere VM encryption if the datastore is a concern
 encryption key sits on the same disk as the encrypted files) and automatic OS patching (the server
 is dark-site capable; patch it with `dnf update` from your own repository on your own schedule).
 
+### HTTPS on the LAN with client certificates (optional)
+
+If people should reach the page from their workstations without an SSH tunnel, put nginx in front of
+the server with TLS **and client-certificate authentication**. Only a browser that presents a client
+certificate issued by your CA gets through. The deployment server itself stays on 127.0.0.1:8080, and
+everything else stays as described above. `deploy-server/enable-https-client-cert.sh` does the server
+side. Verified on 2026-10-16:
+- Without a client certificate, nginx answers HTTP 400.
+- With a client certificate, the page and the API work.
+- nginx logs who connected, e.g. `client="CN=karsten,O=kabun lab" verify=SUCCESS`.
+
+A **private CA** is the right fit here. The client certificate has to be installed in each browser
+anyway, so installing the CA next to it also makes the server certificate trusted. A private CA also
+means no public DNS token on the deployment server, and the server's name stays out of the public
+Certificate Transparency logs. Keep the CA key off the deployment server.
+
+1. **CA (on an admin workstation, once):**
+   ```bash
+   umask 077
+   openssl ecparam -name prime256v1 -genkey -noout | openssl ec -aes256 -out ca.key   # asks for a passphrase
+   printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n' > ca.ext
+   openssl req -new -key ca.key -subj "/O=Example/CN=AutoDeploy CA" -out ca.csr
+   openssl x509 -req -in ca.csr -signkey ca.key -days 3650 -sha256 -extfile ca.ext -out ca.crt
+   ```
+2. **Server key and request, on the deployment server.** The private key never leaves it:
+   ```bash
+   sudo bash /opt/autodeploy/deploy-server/enable-https-client-cert.sh --make-csr --name deploy01.corp.local > server.csr
+   ```
+3. **Sign the server certificate (on the workstation).** Use 397 days at most, the limit browsers accept:
+   ```bash
+   printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:deploy01.corp.local\n' > server.ext
+   openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 397 -sha256 -extfile server.ext -out server.crt
+   ```
+4. **Turn it on (on the server):** copy `server.crt` and `ca.crt` over, then run:
+   ```bash
+   sudo bash /opt/autodeploy/deploy-server/enable-https-client-cert.sh --name deploy01.corp.local --cert server.crt --ca ca.crt
+   ```
+   This installs nginx from AppStream if needed, writes `/etc/nginx/conf.d/autodeploy-https.conf`, sets the
+   SELinux boolean `httpd_can_network_connect` (nginx → 127.0.0.1:8080) and opens `https` in firewalld.
+5. **One client certificate per person (on the workstation).** Hand over the `.p12` and its password separately:
+   ```bash
+   printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n' > client.ext
+   openssl ecparam -name prime256v1 -genkey -noout -out alice.key
+   openssl req -new -key alice.key -subj "/O=Example/CN=alice" -out alice.csr
+   openssl x509 -req -in alice.csr -CA ca.crt -CAkey ca.key -CAserial ca.srl -days 397 -sha256 -extfile client.ext -out alice.crt
+   openssl pkcs12 -export -in alice.crt -inkey alice.key -certfile ca.crt -name "alice (AutoDeploy)" -out alice.p12 && rm alice.key
+   ```
+6. **In each browser:**
+   - Windows (Edge, Chrome): import `ca.crt` into *Trusted Root Certification Authorities* and `alice.p12` into *Personal*. Use the certificate import wizard: double-click the file and choose the store.
+   - macOS: add both files to the login keychain and set `ca.crt` to *Always Trust*.
+   - Firefox has its own store: Settings > Privacy & Security > Certificates.
+   - Then open `https://deploy01.corp.local/`. The browser asks once which certificate to use.
+
+Notes:
+- **Removing a person:** remove their certificate. There's no revocation list, so for an immediate stop,
+  issue new client certificates from a new CA, or switch `ssl_verify_client` off until then.
+- **Renewal:** renew the server and client certificates before the 397 days run out, with steps 2–5
+  (step 2 can reuse the key).
+- **A rebuild of the server from the ISO does not keep this setup.** Run steps 2–4 again after a rebuild.
+
 ---
 
 ## 1d. DNS records from the same CSV (Microsoft AD DNS)
