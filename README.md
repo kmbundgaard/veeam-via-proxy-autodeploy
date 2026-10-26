@@ -93,6 +93,26 @@ is bound to the server's localhost on purpose and has no login of its own:
 ssh -L 8080:127.0.0.1:8080 deploy@10.10.1.20        # then open http://127.0.0.1:8080
 ```
 
+**Optional: open the page over the LAN with HTTPS and a client certificate.** If your admins should open the
+page from their workstations without an SSH tunnel, put nginx in front of it. It's a script in the toolkit:
+`deploy-server/enable-https-client-cert.sh`.
+- The page is then served at `https://<server-fqdn>/` on port 443 of the server's LAN address.
+- Only a browser that presents a **client certificate issued by your CA** gets through. Without one, the
+  server answers HTTP 400.
+- The page itself still listens only on the server's localhost. The tunnel keeps working.
+
+What you need:
+- **A CA.** A small private one is enough; you'll find the commands in the README.
+- **A server certificate for the server's FQDN.** The server creates its own private key, and the key never
+  leaves it.
+- **One client certificate (`.p12`) per admin.** Import the CA certificate and the `.p12` into each admin's
+  browser.
+
+Always open the page by its FQDN (the name in the certificate), not by its IP address. The full steps are in
+`Deploy-VeeamProxies.README.md`, section 1c, "HTTPS on the LAN with client certificates".
+- **Don't make port 443 reachable from the internet.** The page can create and delete VMs.
+- **A server rebuilt from the ISO doesn't keep this setup.** Run the script again with the same certificates.
+
 ### Build machine on Windows: installing xorriso
 
 xorriso is a Linux tool. On Windows the toolkit runs it inside WSL (Windows Subsystem for Linux)
@@ -210,11 +230,11 @@ in `deploy-server/ks.cfg.template` for review.
 
 | Area | Setting |
 |------|---------|
-| Network | Two listeners only: SSH on the network, the web API on 127.0.0.1:8080. Firewall allows SSH alone. |
+| Network | Two listeners only: SSH on the network, the web API on 127.0.0.1:8080. Firewall allows SSH alone. With the optional HTTPS front end there's a third: nginx on 443, client certificate required, and the firewall also allows `https`. |
 | SSH | Key-only for the `deploy` account. Password and keyboard-interactive authentication off, root login off, X11 forwarding off, `AllowUsers deploy`. A user-name-and-password attempt is refused before any prompt. |
 | Accounts | Root locked. `deploy` has no password unless one is set at build time; with a password, sudo asks for it. Without one, sudo is passwordless, so the SSH private key is a root credential. |
 | OS | Rocky Linux 9 minimal, SELinux enforcing, no extra packages beyond PowerShell, xorriso and their libraries. |
 | Service | Runs as `deploy` under systemd sandboxing: read-only system (`ProtectSystem=strict`), `NoNewPrivileges`, private `/tmp`. |
-| Web page | No login of its own; reachable only through the SSH tunnel. For several users on a LAN, put nginx with TLS and authentication in front and keep the listener on localhost. |
+| Web page | No login of its own; by default reachable only through the SSH tunnel. For several users on a LAN, use the optional HTTPS front end (`deploy-server/enable-https-client-cert.sh`). nginx with TLS 1.2/1.3 lets in only browsers presenting a client certificate from your CA, logs each client's certificate name, and the page itself stays on localhost. Never bind the page's listener to a LAN address directly. |
 | Secrets | Settings files are encrypted at rest (AES-256-CBC + HMAC-SHA256) with a key readable only by `deploy`. Passwords typed for a run are stored encrypted for that run and deleted when it ends. Nothing secret is written to logs. |
 | Not covered | Disk encryption: the encryption key sits on the same disk as the encrypted files, so use vSphere VM encryption if the datastore is a concern. Automatic OS patching: the server works offline; patch it from your own repository on your own schedule. |
