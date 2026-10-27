@@ -1,7 +1,9 @@
 # =============================================================================
 # ks.cfg.template  -  unattended Rocky Linux 9 install for the DEPLOYMENT SERVER
 # =============================================================================
-# Rendered by Build-DeployServerIso.ps1 and embedded as /ks.cfg in a repacked Rocky 9 minimal ISO.
+# Rendered by Build-DeployServerIso.ps1 and embedded as /ks.cfg in a repacked Rocky 9 minimal ISO, or
+# (-NoXorriso) put on a second ISO labelled OEMDRV next to the untouched Rocky ISO; the installer loads a
+# ks.cfg from an OEMDRV volume by itself, and %post --nochroot finds the payload there.
 # Result: a hardened-enough minimal Rocky host with pwsh 7, xorriso, PowerCLI (for the 'deploy'
 # user), the project in /opt/autodeploy and the deployment-server systemd unit enabled.
 # Everything is installed from the ISO's /payload folder, so it works at a dark site; when the RPM
@@ -45,7 +47,15 @@ curl
 %post --nochroot --log=/mnt/sysimage/root/ks-post-nochroot.log
 set -x
 mkdir -p /mnt/sysimage/opt/autodeploy-payload
-cp -r /run/install/repo/payload/. /mnt/sysimage/opt/autodeploy-payload/
+SRC=/run/install/repo/payload
+if [ ! -d "$SRC" ]; then
+    # -NoXorriso build: the payload is on the OEMDRV seed ISO, which the installer does not keep mounted.
+    mkdir -p /mnt/oemdrv && mount -o ro /dev/disk/by-label/OEMDRV /mnt/oemdrv && SRC=/mnt/oemdrv/payload
+fi
+cp -r "$SRC/." /mnt/sysimage/opt/autodeploy-payload/
+# A seed ISO without Rock Ridge (Windows IMAPI2) shows every file read-only: make the copies writable.
+chmod -R u+w /mnt/sysimage/opt/autodeploy-payload
+if mountpoint -q /mnt/oemdrv; then umount /mnt/oemdrv; fi
 %end
 
 %post --log=/root/ks-post.log
@@ -56,6 +66,12 @@ P=/opt/autodeploy-payload
 mkdir -p /opt/autodeploy/server-data/iso /opt/autodeploy/server-data/secrets /opt/autodeploy/server-data/runs
 cp -r "$P/project/." /opt/autodeploy/
 if [ -d "$P/iso" ]; then cp "$P"/iso/*.iso /opt/autodeploy/server-data/iso/ 2>/dev/null || true; fi
+# -NoXorriso splits files of 2 GiB or more into <name>.part000, .part001, ... (seed ISO file limit): join them.
+for first in "$P"/iso/*.part000; do
+    [ -e "$first" ] || continue
+    base="${first%.part000}"
+    cat "$base".part* > "/opt/autodeploy/server-data/iso/$(basename "$base")"
+done
 
 # 2. pwsh 7 + xorriso (+ deps) from the payload; fall back to online resolution if a dependency is missing.
 #    rsync goes in its OWN transaction: a build made for a newer Rocky minor (needs a newer libacl than the

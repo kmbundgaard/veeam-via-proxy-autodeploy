@@ -2,6 +2,25 @@
 
 ## 1.3.2 - unreleased
 
+- **Deployment server without xorriso or WSL: `Build-DeployServerIso.ps1 -NoXorriso`.** For build machines
+  where xorriso can't be installed and WSL can't be turned on. The Rocky ISO stays untouched. `-OutIso` is a
+  small second ISO labelled `OEMDRV` with only `ks.cfg` and the payload; the Rocky installer loads a kickstart
+  from such a volume by itself.
+  - Windows writes the seed ISO with the built-in IMAPI2, macOS with `hdiutil`, Linux with `genisoimage`,
+    `mkisofs` or `xorriso`.
+  - `New-DeployServerVm.ps1 -SeedIsoPath` uploads both ISOs, attaches the seed ISO in a second CD drive and
+    removes that drive after the install. `-RockyIso` is optional with `-NoXorriso`.
+  - Files of 2 GiB or more (the appliance ISOs) are split into 1 GiB parts on the seed ISO and joined again in
+    the kickstart's `%post`. IMAPI2 refuses larger files on ISO 9660 / Joliet ("Data file is too large").
+  - The kickstart mounts the `OEMDRV` volume when the payload isn't on the install ISO, and makes the copied
+    files writable (an IMAPI2 ISO has no Rock Ridge permissions). The existing build is unchanged.
+  - IMAPI2 keeps the source files open until its COM objects are released. The build releases them, so the
+    work folder in `%TEMP%` (19 GB with the appliance ISOs) is deleted afterwards. If a work folder can't be
+    deleted, the build now prints a warning instead of failing silently.
+  - Lab (2026-10-27): seed ISO built on Windows Server 2022 (vone) with IMAPI2 only, 18 GB with the VIA and VSA
+    ISOs, in 4 minutes. The VM installed from the untouched Rocky 9.8 ISO plus the seed ISO in 27 minutes. Both
+    joined appliance ISOs match the source SHA-256, the service answers on 8080 and the hardening is as before.
+
 - **Optional HTTPS on the LAN with client-certificate authentication** for the deployment server:
   `deploy-server/enable-https-client-cert.sh`. nginx terminates TLS on 443 and only lets through a browser that
   presents a client certificate from your CA. The server itself stays on `127.0.0.1:8080`, and the firewall

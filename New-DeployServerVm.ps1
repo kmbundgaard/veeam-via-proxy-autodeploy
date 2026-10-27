@@ -5,10 +5,19 @@
     let the unattended Rocky install run (it ends with power-off), detach the ISO, power on and
     wait for SSH.
 
+    With -SeedIsoPath (a Build-DeployServerIso.ps1 -NoXorriso build) -IsoPath is the UNTOUCHED Rocky ISO
+    and the seed ISO (OEMDRV: kickstart + payload) goes into a second CD drive. Both are detached after
+    the install and the second drive is removed.
+
 .EXAMPLE
     pwsh -File ./New-DeployServerVm.ps1 -vCenterServer vc01.lab.example -vCenterUser administrator@vsphere.local `
         -Name deploy01 -Cluster Prod-Cluster -Datastore SSD-2 -Portgroup 'VM Network' -Folder LAB2.0 `
         -IsoPath ~/iso/deploy-server.iso -Ip 10.10.1.20
+
+.EXAMPLE
+    pwsh -File .\New-DeployServerVm.ps1 -vCenterServer vc01.lab.example -vCenterUser administrator@vsphere.local `
+        -Name deploy01 -Cluster Prod-Cluster -Datastore SSD-2 -Portgroup 'VM Network' `
+        -IsoPath .\iso\Rocky-9.8-x86_64-minimal.iso -SeedIsoPath .\deploy-server-seed.iso -Ip 10.10.1.20
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -21,11 +30,13 @@ param(
     [Parameter(Mandatory)][string]$Portgroup,
     [string]$Folder,
     [Parameter(Mandatory)][ValidateScript({ Test-Path $_ -PathType Leaf })][string]$IsoPath,
+    [ValidateScript({ Test-Path $_ -PathType Leaf })][string]$SeedIsoPath,   # -NoXorriso build: OEMDRV seed ISO; -IsoPath is then the untouched Rocky ISO
     [Parameter(Mandatory)][string]$Ip,          # the static IP baked into the ISO's kickstart (used to wait for SSH)
     [int]$Cpu = 4, [int]$MemoryGB = 8, [int]$DiskGB = 100,
     [int]$InstallTimeoutSec = 2400,
     # The ISO is already in [<datastore>] iso/<file name> (copied there another way, e.g. a rate-limited
     # upload over a weak VPN): skip the upload. Its size must match -IsoPath, so a stale copy is refused.
+    # With -SeedIsoPath this applies to both ISOs.
     [switch]$UseUploadedIso,
     [switch]$KeepIso
 )
@@ -50,23 +61,29 @@ try {
 
     # upload ISO
     $isoDs = if ($ds -is [VMware.VimAutomation.ViCore.Types.V1.DatastoreManagement.DatastoreCluster]) { Get-Datastore -RelatedObject $ds | Sort-Object FreeSpaceGB -Descending | Select-Object -First 1 } else { $ds }
-    $leaf = Split-Path $IsoPath -Leaf
-    if ($UseUploadedIso) {
-        $drv = "dsiso_$([guid]::NewGuid().ToString('N').Substring(0,6))"
-        New-PSDrive -Name $drv -PSProvider VimDatastore -Root '\' -Datastore $isoDs | Out-Null
-        try { $have = Get-Item "${drv}:\iso\$leaf" -ErrorAction SilentlyContinue } finally { Remove-PSDrive $drv -ErrorAction SilentlyContinue }
-        $want = (Get-Item -LiteralPath $IsoPath).Length
-        if (-not $have) { throw "-UseUploadedIso: [$($isoDs.Name)] iso/$leaf does not exist." }
-        if ($have.Length -ne $want) { throw "-UseUploadedIso: [$($isoDs.Name)] iso/$leaf is $($have.Length) bytes, the local ISO $want - upload incomplete or a different build." }
-        Log "Using the ISO already on [$($isoDs.Name)] iso/$leaf ($([math]::Round($want / 1MB)) MB, size matches)." 'OK'
+    function Send-Iso {
+        param([string]$Path)
+        $leaf = Split-Path $Path -Leaf
+        if ($UseUploadedIso) {
+            $drv = "dsiso_$([guid]::NewGuid().ToString('N').Substring(0,6))"
+            New-PSDrive -Name $drv -PSProvider VimDatastore -Root '\' -Datastore $isoDs | Out-Null
+            try { $have = Get-Item "${drv}:\iso\$leaf" -ErrorAction SilentlyContinue } finally { Remove-PSDrive $drv -ErrorAction SilentlyContinue }
+            $want = (Get-Item -LiteralPath $Path).Length
+            if (-not $have) { throw "-UseUploadedIso: [$($isoDs.Name)] iso/$leaf does not exist." }
+            if ($have.Length -ne $want) { throw "-UseUploadedIso: [$($isoDs.Name)] iso/$leaf is $($have.Length) bytes, the local ISO $want - upload incomplete or a different build." }
+            Log "Using the ISO already on [$($isoDs.Name)] iso/$leaf ($([math]::Round($want / 1MB)) MB, size matches)." 'OK'
+        }
+        elseif ($PSCmdlet.ShouldProcess($isoDs.Name, "Upload $leaf")) {
+            $drv = "dsiso_$([guid]::NewGuid().ToString('N').Substring(0,6))"
+            New-PSDrive -Name $drv -PSProvider VimDatastore -Root '\' -Datastore $isoDs | Out-Null
+            try { if (-not (Test-Path "${drv}:\iso")) { New-Item -ItemType Directory -Path "${drv}:\iso" | Out-Null }; for ($t = 1; ; $t++) { try { Copy-DatastoreItem -Item $Path -Destination "${drv}:\iso\$leaf" -Force; break } catch { if ($t -ge 3) { throw }; Log "Upload failed (attempt $t/3): $($_.Exception.Message) - retrying in 30s." 'WARN'; Start-Sleep -Seconds 30 } } } finally { Remove-PSDrive $drv -ErrorAction SilentlyContinue }
+            Log "Uploaded ISO to [$($isoDs.Name)] iso/$leaf" 'OK'
+        }
+        return ("[{0}] iso/{1}" -f $isoDs.Name, $leaf)
     }
-    elseif ($PSCmdlet.ShouldProcess($isoDs.Name, "Upload $leaf")) {
-        $drv = "dsiso_$([guid]::NewGuid().ToString('N').Substring(0,6))"
-        New-PSDrive -Name $drv -PSProvider VimDatastore -Root '\' -Datastore $isoDs | Out-Null
-        try { if (-not (Test-Path "${drv}:\iso")) { New-Item -ItemType Directory -Path "${drv}:\iso" | Out-Null }; for ($t = 1; ; $t++) { try { Copy-DatastoreItem -Item $IsoPath -Destination "${drv}:\iso\$leaf" -Force; break } catch { if ($t -ge 3) { throw }; Log "Upload failed (attempt $t/3): $($_.Exception.Message) - retrying in 30s." 'WARN'; Start-Sleep -Seconds 30 } } } finally { Remove-PSDrive $drv -ErrorAction SilentlyContinue }
-        Log "Uploaded ISO to [$($isoDs.Name)] iso/$leaf" 'OK'
-    }
-    $isoDsPath = "[{0}] iso/{1}" -f $isoDs.Name, $leaf
+    if ($SeedIsoPath -and (Split-Path $SeedIsoPath -Leaf) -eq (Split-Path $IsoPath -Leaf)) { throw "-IsoPath and -SeedIsoPath have the same file name; both go to [datastore] iso/." }
+    $isoDsPath = Send-Iso $IsoPath
+    $seedDsPath = if ($SeedIsoPath) { Send-Iso $SeedIsoPath } else { $null }
 
     if ($PSCmdlet.ShouldProcess($Name, "New-VM $Cpu vCPU / $MemoryGB GB / $DiskGB GB, UEFI + Secure Boot, boot the installer")) {
         $p = @{ Name = $Name; VMHost = $vmhost; Datastore = $ds; NumCpu = $Cpu; MemoryGB = $MemoryGB; DiskGB = $DiskGB; DiskStorageFormat = 'Thin'; GuestId = 'rhel9_64Guest'; Portgroup = $pg; CD = $true }
@@ -77,6 +94,8 @@ try {
         $spec.BootOptions = New-Object VMware.Vim.VirtualMachineBootOptions; $spec.BootOptions.EfiSecureBootEnabled = $true
         $vm.ExtensionData.ReconfigVM($spec)
         Get-CDDrive -VM $vm | Set-CDDrive -IsoPath $isoDsPath -StartConnected:$true -Confirm:$false | Out-Null
+        # Seed ISO in a second drive: not bootable, so the firmware boots the Rocky ISO and the installer finds OEMDRV.
+        if ($seedDsPath) { New-CDDrive -VM $vm -IsoPath $seedDsPath -StartConnected:$true | Out-Null; Log "Seed ISO $seedDsPath in a second CD drive (Rocky boot menu untouched: 60 s wait + media check before the install)." }
         Start-VM -VM $vm -Confirm:$false | Out-Null
         Log "VM '$Name' created on $($vmhost.Name) and powered on - unattended Rocky install running (ends with power-off)." 'OK'
 
@@ -86,7 +105,11 @@ try {
         if ($vm.PowerState -eq 'PoweredOn') { throw "Installer did not finish within ${InstallTimeoutSec}s - check the VM console." }
         Log "Install finished (VM powered off). Detaching ISO and booting from disk." 'OK'
         Get-CDDrive -VM $vm | Set-CDDrive -NoMedia -Confirm:$false | Out-Null
-        if (-not $KeepIso) { $drv = "dsiso_$([guid]::NewGuid().ToString('N').Substring(0,6))"; New-PSDrive -Name $drv -PSProvider VimDatastore -Root '\' -Datastore $isoDs | Out-Null; try { Remove-Item "${drv}:\iso\$leaf" -Force -ErrorAction SilentlyContinue } finally { Remove-PSDrive $drv -ErrorAction SilentlyContinue } }
+        if ($seedDsPath) { Get-CDDrive -VM $vm | Select-Object -Skip 1 | Remove-CDDrive -Confirm:$false }
+        if (-not $KeepIso) {
+            $drv = "dsiso_$([guid]::NewGuid().ToString('N').Substring(0,6))"; New-PSDrive -Name $drv -PSProvider VimDatastore -Root '\' -Datastore $isoDs | Out-Null
+            try { foreach ($iso in @($IsoPath, $SeedIsoPath) | Where-Object { $_ }) { Remove-Item "${drv}:\iso\$(Split-Path $iso -Leaf)" -Force -ErrorAction SilentlyContinue } } finally { Remove-PSDrive $drv -ErrorAction SilentlyContinue }
+        }
         Start-VM -VM $vm -Confirm:$false | Out-Null
 
         # 2) wait for SSH on the kickstart IP

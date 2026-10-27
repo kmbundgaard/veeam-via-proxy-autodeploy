@@ -41,7 +41,8 @@ them your downloads of these two so the image contains your own copies.
 image that carries this toolkit, PowerShell, xorriso, PowerCLI and your appliance ISO. The build
 machine needs PowerShell 7, PowerCLI (for the VM step) and xorriso: on Linux or macOS install
 xorriso natively; on Windows it runs inside WSL (`wsl --install -d Ubuntu`, then
-`sudo apt install xorriso` in the distro, pass `-WslDistro Ubuntu` if it is not your default). All
+`sudo apt install xorriso` in the distro, pass `-WslDistro Ubuntu` if it is not your default). If you
+may not install xorriso or turn on WSL, see "Build machine without xorriso or WSL" below. All
 seven RPMs from the table go into one folder, given as `-RpmDir`.
 `New-DeployServerVm.ps1` creates the VM, lets it install, detaches the ISO and boots it. Put the
 seven RPMs from the table (PowerShell, xorriso, libisoburn, libisofs, libburn, libicu, rsync) in one folder
@@ -137,11 +138,43 @@ you run deployments from Windows).
   from the `.deb` packages `xorriso`, `libisoburn1`, `libisofs6` and `libburn4`, fetched on a
   connected machine with `apt download`. Alternatively build the ISO on any Linux host with
   xorriso; the ISO is portable.
-- **WSL not allowed:** a native Windows build (Cygwin or MSYS2 package) works through
-  `-XorrisoCommand C:\path\to\xorriso.exe`. It is a third-party build and the least tested route.
+- **WSL not allowed:** use `-NoXorriso` (next section), which needs nothing beyond Windows itself. A
+  native Windows xorriso (Cygwin or MSYS2 package) also works through
+  `-XorrisoCommand C:\path\to\xorriso.exe`; it is a third-party build and the least tested route.
 - **PowerCLI** is the other half of the build machine: `New-DeployServerVm.ps1` needs it.
   `Install-Module VCF.PowerCLI -Scope CurrentUser` once, or copy the `Save-Module` folder into
   `Documents\PowerShell\Modules` on a dark site.
+
+### Build machine without xorriso or WSL
+
+With `-NoXorriso` the Rocky ISO is not modified at all. The build writes a second, small ISO with
+the volume label `OEMDRV` that holds only the kickstart and the payload. The Rocky installer finds a
+`ks.cfg` on a volume with that label by itself. Windows writes this ISO with IMAPI2, which is part of
+Windows, so nothing has to be installed and WSL stays off. macOS uses `hdiutil`. Linux uses
+`genisoimage`, `mkisofs` or `xorriso`, whichever is present.
+
+```powershell
+pwsh -File .\Build-DeployServerIso.ps1 -NoXorriso -OutIso .\deploy-server-seed.iso `
+     -Hostname deploy01.corp.local -Ip 10.10.1.20 -Gateway 10.10.1.1 -Dns 10.10.1.5 `
+     -SshPublicKeyFile "$HOME\.ssh\id_ed25519.pub,.\keys\anna.pub" -RpmDir .\rpms `
+     -IncludeIso .\iso\VeeamInfrastructureAppliance_13.1.1.18_20260825.iso
+pwsh -File .\New-DeployServerVm.ps1 -vCenterServer vc01.corp.local -vCenterUser svc-deploy@vsphere.local `
+     -Name deploy01 -Cluster CL-Mgmt -Datastore DS-Mgmt -Portgroup 'VM Network' `
+     -IsoPath .\iso\Rocky-9-minimal.iso -SeedIsoPath .\deploy-server-seed.iso -Ip 10.10.1.20
+```
+
+- `New-DeployServerVm.ps1 -SeedIsoPath` uploads both ISOs and puts the seed ISO in a second CD drive.
+  After the install it detaches both, removes the second drive and deletes both ISOs from the
+  datastore (keep them with `-KeepIso`).
+- The Rocky boot menu is untouched, so the VM waits 60 seconds on it and then runs the media check
+  before the install starts. That adds a few minutes to the build.
+- Files of 2 GB or more, such as the appliance ISOs, are split into 1 GB parts on the seed ISO,
+  because the Windows ISO writer can't hold larger files. The server joins the parts again during the install.
+- No PowerCLI on the build machine either? Create the VM by hand in the vSphere Client: Rocky 9
+  guest, EFI with Secure Boot, the Rocky ISO in the first CD drive and the seed ISO in a second one.
+  When the VM powers off at the end of the install, disconnect both ISOs and power it on again.
+  `Build-DeployServerIso.ps1 -NoXorriso` still needs PowerCLI installed, or a `Save-Module` folder
+  given as `-PowerCliModulesDir`, because the modules go into the payload.
 
 ## Option B: run on an existing host
 

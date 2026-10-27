@@ -22,14 +22,27 @@
     sudo then asks for that password, and SSH STAYS key-only. Firewall: SSH only. SELinux enforcing.
     The install ends with POWER OFF; New-DeployServerVm.ps1 detaches the ISO and powers the VM on again.
 
+    -NoXorriso: for a build host where xorriso / WSL may not be installed. The Rocky ISO is NOT modified.
+    -OutIso becomes a small second ISO labelled OEMDRV that carries only /ks.cfg and /payload; the Rocky
+    installer loads a ks.cfg from an OEMDRV volume by itself. Windows writes it with the built-in IMAPI2
+    (nothing to install), macOS with hdiutil, Linux with genisoimage / mkisofs / xorriso. The VM gets both
+    ISOs: New-DeployServerVm.ps1 -IsoPath <untouched Rocky ISO> -SeedIsoPath <OEMDRV ISO>. Because the
+    Rocky boot menu is untouched, it waits 60 s and runs the media check before the install starts.
+    Files of 2 GiB or more (appliance ISOs) are split into 1 GiB parts on the seed ISO and joined again in %post.
+
 .EXAMPLE
     pwsh -File ./Build-DeployServerIso.ps1 -RockyIso ~/iso/Rocky-9.8-x86_64-minimal.iso -OutIso ~/iso/deploy-server.iso `
         -Hostname deploy01.lab.example -Ip 10.10.1.20 -Netmask 255.255.255.0 -Gateway 10.10.1.1 -Dns 10.10.1.5 `
         -RpmDir ~/payload/rpms -IncludeIso ~/iso/VeeamInfrastructureAppliance_13.1.1.18_20260825.iso,~/iso/VeeamSoftwareAppliance_13.1.1.18_20260825.iso
+
+.EXAMPLE
+    # Windows without xorriso / WSL: seed ISO next to the untouched Rocky ISO
+    pwsh -File .\Build-DeployServerIso.ps1 -NoXorriso -OutIso .\deploy-server-seed.iso `
+        -Hostname deploy01.lab.example -Ip 10.10.1.20 -Gateway 10.10.1.1 -Dns 10.10.1.5 -RpmDir .\rpms
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateScript({ Test-Path $_ -PathType Leaf })][string]$RockyIso,
+    [ValidateScript({ Test-Path $_ -PathType Leaf })][string]$RockyIso,   # required unless -NoXorriso
     [Parameter(Mandatory)][string]$OutIso,
     [Parameter(Mandatory)][string]$Hostname,
     [Parameter(Mandatory)][string]$Ip,
@@ -46,6 +59,7 @@ param(
     [string[]]$IncludeIso = @(),
     [string]$XorrisoCommand,
     [string]$WslDistro,                   # Windows: WSL distro that has xorriso (default distro when empty)
+    [switch]$NoXorriso,                   # build only the OEMDRV seed ISO (ks.cfg + payload); the Rocky ISO stays untouched
     [switch]$Force
 )
 Set-StrictMode -Version Latest
@@ -91,9 +105,90 @@ function Xorriso {
     $out | Where-Object { $_ -match 'error|fail|cannot' -and $_ -notmatch 'NOTE|UPDATE' } | ForEach-Object { Log $_ 'WARN' }
     if ($LASTEXITCODE -ne 0) { throw "xorriso failed (exit $LASTEXITCODE): $($Arguments -join ' ')" }
 }
+# -NoXorriso: write a plain data ISO (volume label OEMDRV) from a folder with whatever this OS has built in.
+# No Rock Ridge from IMAPI2, so the installer sees every file read-only; the kickstart adds u+w after the copy.
+function New-SeedIso {
+    param([Parameter(Mandatory)][string]$SourceDir, [Parameter(Mandatory)][string]$Path, [string]$VolumeName = 'OEMDRV')
+    $Path = Get-AbsolutePath $Path
+    if ($IsWindows) {
+        # IMAPI2 (part of Windows): ISO 9660 + Joliet; Joliet keeps the long, case-preserved names Linux mounts.
+        if (-not ('AutoDeploy.IsoStreamWriter' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+namespace AutoDeploy {
+    public static class IsoStreamWriter {
+        public static void Write(object stream, string path) {
+            IStream s = (IStream)stream;
+            byte[] buf = new byte[1 << 20];
+            IntPtr pRead = Marshal.AllocCoTaskMem(sizeof(int));
+            try {
+                using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write)) {
+                    while (true) { s.Read(buf, buf.Length, pRead); int n = Marshal.ReadInt32(pRead); if (n <= 0) break; fs.Write(buf, 0, n); }
+                }
+            } finally { Marshal.FreeCoTaskMem(pRead); }
+        }
+    }
+}
+'@
+        }
+        # IMAPI2 keeps every source file open until its COM objects are gone: release them all and collect, or the
+        # work folder (19 GB with the appliance ISOs) cannot be deleted afterwards (left behind in %TEMP%, lab 2026-10-27).
+        $fsi = $root = $result = $stream = $null
+        try {
+            $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
+            $fsi.ChooseImageDefaultsForMediaType(18)   # IMAPI_MEDIA_TYPE_BDR: capacity limit 25 GB instead of a CD's 700 MB
+            $fsi.FileSystemsToCreate = 3               # ISO 9660 + Joliet
+            $fsi.VolumeName = $VolumeName
+            $root = $fsi.Root
+            $root.AddTree($SourceDir, $false)          # $false: the folder's contents at the ISO root
+            $result = $fsi.CreateResultImage(); $stream = $result.ImageStream
+            [AutoDeploy.IsoStreamWriter]::Write($stream, $Path)
+        }
+        finally {
+            foreach ($o in @($stream, $result, $root, $fsi)) { if ($null -ne $o) { [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($o) } }
+            $fsi = $root = $result = $stream = $null
+            [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
+        }
+    }
+    elseif ($IsMacOS) {
+        $out = & hdiutil makehybrid -o $Path $SourceDir -iso -joliet -default-volume-name $VolumeName -iso-volume-name $VolumeName -joliet-volume-name $VolumeName 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "hdiutil makehybrid failed (exit $LASTEXITCODE): $out" }
+    }
+    else {
+        $tool = @('genisoimage', 'mkisofs', 'xorriso') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+        if (-not $tool) { throw "-NoXorriso on Linux needs genisoimage, mkisofs or xorriso (dnf/apt install genisoimage)." }
+        $isoArgs = @('-o', $Path, '-V', $VolumeName, '-J', '-r', $SourceDir)
+        $out = if ($tool -eq 'xorriso') { & xorriso -as mkisofs @isoArgs 2>&1 } else { & $tool @isoArgs 2>&1 }
+        if ($LASTEXITCODE -ne 0) { throw "$tool failed (exit $LASTEXITCODE): $out" }
+    }
+}
+# IMAPI2's ISO 9660 / Joliet writer refuses files of 2 GiB or more ("Data file is too large"; plain ISO 9660 stops at
+# 4 GiB anyway): those go on the seed ISO as <name>.part000, .part001, ... and the kickstart joins them again.
+function Copy-SplitFile {
+    param([Parameter(Mandatory)][string]$Source, [Parameter(Mandatory)][string]$DestinationDir, [long]$PartSize = 1GB)
+    $leaf = Split-Path -Leaf $Source
+    if ((Get-Item -LiteralPath $Source).Length -lt 2GB) { Copy-Item -LiteralPath $Source -Destination $DestinationDir; return }
+    $in = [System.IO.File]::OpenRead($Source); $buf = [byte[]]::new(4MB); $part = 0
+    try {
+        while ($in.Position -lt $in.Length) {
+            $out = [System.IO.File]::Create((Join-Path $DestinationDir ('{0}.part{1:000}' -f $leaf, $part)))
+            try { $left = $PartSize; while ($left -gt 0 -and ($n = $in.Read($buf, 0, [int][math]::Min([long]$buf.Length, $left))) -gt 0) { $out.Write($buf, 0, $n); $left -= $n } } finally { $out.Dispose() }
+            $part++
+        }
+    } finally { $in.Dispose() }
+    Log "Payload: $leaf split into $part parts (seed ISO file limit); joined again on the server"
+}
 
 if ((Test-Path $OutIso) -and -not $Force) { throw "'$OutIso' exists - use -Force." }
-if ($script:UseWsl) {
+if (-not $NoXorriso -and -not $RockyIso) { throw "-RockyIso is required (or use -NoXorriso to build only the seed ISO that goes next to the untouched Rocky ISO)." }
+if ($NoXorriso) {
+    $how = if ($IsWindows) { 'Windows IMAPI2' } elseif ($IsMacOS) { 'hdiutil' } else { 'genisoimage / mkisofs / xorriso' }
+    Log "-NoXorriso: building only the OEMDRV seed ISO with $how; the Rocky ISO is not modified" 'INFO'
+}
+elseif ($script:UseWsl) {
     $probe = @(); if ($WslDistro) { $probe += @('-d', $WslDistro) }; $probe += @('--', 'xorriso', '-version')
     & wsl.exe @probe 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -189,7 +284,14 @@ try {
     foreach ($n in $done.Keys) { $dst = Join-Path (Join-Path $payload 'powershell-modules') $n; New-Item -ItemType Directory -Path $dst -Force | Out-Null; Copy-Item $done[$n] $dst -Recurse }
     Log "Payload: PowerCLI modules: $($done.Keys -join ', ')"
 
-    if ($IncludeIso.Count) { New-Item -ItemType Directory -Path (Join-Path $payload 'iso') -Force | Out-Null; foreach ($i in $IncludeIso) { if (-not (Test-Path $i)) { throw "ISO not found: $i" }; Copy-Item $i (Join-Path $payload 'iso'); Log "Payload: appliance ISO $(Split-Path $i -Leaf)" } }
+    if ($IncludeIso.Count) {
+        New-Item -ItemType Directory -Path (Join-Path $payload 'iso') -Force | Out-Null
+        foreach ($i in $IncludeIso) {
+            if (-not (Test-Path $i)) { throw "ISO not found: $i" }
+            if ($NoXorriso) { Copy-SplitFile -Source $i -DestinationDir (Join-Path $payload 'iso') } else { Copy-Item $i (Join-Path $payload 'iso') }
+            Log "Payload: appliance ISO $(Split-Path $i -Leaf)"
+        }
+    }
     $mb = [math]::Round((Get-ChildItem $payload -Recurse -File | Measure-Object Length -Sum).Sum / 1MB); Log "Payload size: $mb MB"
 
     # --- kickstart ----------------------------------------------------------------------------------------
@@ -203,6 +305,21 @@ try {
     if ($left) { throw "Unrendered kickstart tokens: $($left -join ', ')" }
     $ksPath = Join-Path $work 'ks.cfg'
     [System.IO.File]::WriteAllText($ksPath, ($ks -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+
+    if ($NoXorriso) {
+        # Seed ISO: /ks.cfg + /payload only. Staged in its own folder so the ISO root holds nothing else.
+        $seed = Join-Path $work 'seed'
+        New-Item -ItemType Directory -Path $seed -Force | Out-Null
+        Move-Item -LiteralPath $ksPath -Destination (Join-Path $seed 'ks.cfg')
+        Move-Item -LiteralPath $payload -Destination (Join-Path $seed 'payload')
+        if (Test-Path $OutIso) { Remove-Item $OutIso -Force }
+        Log "Writing seed ISO -> $OutIso (volume OEMDRV, $mb MB payload)"
+        New-SeedIso -SourceDir $seed -Path $OutIso
+        $rocky = if ($RockyIso) { $RockyIso } else { '<Rocky-9-minimal.iso>' }
+        Log "Built $OutIso ($([math]::Round((Get-Item $OutIso).Length / 1MB)) MB). Next: New-DeployServerVm.ps1 -IsoPath $rocky -SeedIsoPath $OutIso -Ip $Ip ..." 'OK'
+        Log "Server will come up as deploy@$Ip ($Hostname); tunnel: ssh -L 8080:127.0.0.1:8080 deploy@$Ip" 'OK'
+        return
+    }
 
     # --- grub: default = Install entry, timeout 5, inst.ks on every kernel line --------------------------------
     $grubPath = Join-Path $work 'grub.cfg'
@@ -227,4 +344,7 @@ try {
     Log "Built $OutIso ($([math]::Round((Get-Item $OutIso).Length / 1MB)) MB). Next: New-DeployServerVm.ps1 -IsoPath $OutIso -Ip $Ip ..." 'OK'
     Log "Server will come up as deploy@$Ip ($Hostname); tunnel: ssh -L 8080:127.0.0.1:8080 deploy@$Ip" 'OK'
 }
-finally { Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
+finally {
+    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path $work) { Log "Could not remove the work folder $work (a file is still open) - delete it by hand." 'WARN' }
+}
