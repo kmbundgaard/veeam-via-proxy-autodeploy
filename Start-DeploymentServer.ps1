@@ -369,6 +369,13 @@ function New-Run {
         if ($pol -and $pol -ne 'Auto') { if ($pol -ne 'Disable') { throw 'Bad replace job policy.' }; $a.Add('-ReplaceJobPolicy Disable') }
         if ((Get-Field $Req 'purgeOldVm')) { $a.Add('-PurgeOldVm') }
     }
+    # vSphere tags from the planner ('Category = Tag' per line) for every VM of the run; Validate only checks them.
+    $tagLines = @(([string](Get-Field $Req 'tags')) -split '\r?\n|;' | ForEach-Object { ($_ -replace '\s*=\s*', '=').Trim() } | Where-Object { $_ })
+    if ($tagLines.Count -and $mode -in @('Validate', 'WhatIf', 'DeployOnly', 'Full')) {
+        foreach ($t in $tagLines) { if ($t -notmatch '^[^=]+=[^=]+$') { throw "Bad tag line '$t' (expected 'Category = Tag')." } }
+        $a.Add("-Tag $(& $q ($tagLines -join ';'))")
+        if ((Get-Field $Req 'createMissingTags')) { $a.Add('-CreateMissingTags') }
+    }
     switch ($mode) {
         'Validate'     { $a.Add('-ValidateOnly') }
         'WhatIf'       { $a.Add('-WhatIf') }

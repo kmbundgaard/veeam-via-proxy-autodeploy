@@ -2,6 +2,40 @@
 
 ## 1.3.2 - unreleased
 
+- **VM name separate from the host name.** New optional CSV column `vmname` for the name in vCenter, for
+  naming standards such as `ros_km_vpr-nodspa0101` (VM) with `vpr-nodspa0101` (host name). Underscores are
+  kept; empty = `hostname`, so existing CSVs behave as before. Every lookup by name (pre-check, `-Rollback`,
+  the `-IsoOnly` build sheet) uses it.
+- **Fleet planner naming.** The generator has free-text **Datacenter** and **Location** fields (tokens
+  `{datacenter}`, `{location}`), a **VM name pattern** (fills `vmname`; `{hostname}` = the generated host
+  name, literal text such as `km` kept as typed, underscores kept), a **Search domain** (the host name stays
+  short; fills `dnssearch` and `vbrname` = `hostname.domain`; the DNS command gets `-ZoneName`) and a
+  **VM/Host group** field (fills `vmgroup`; `{cluster}` = the cluster name, suggestions `vmgr-{cluster}` and
+  `vmgu-{cluster}`). A `_` in the namespace is no longer turned into `-` in the VM name (only in the host
+  name, where DNS needs it). The naming fields and the tag list are remembered in the browser.
+- **vSphere tags: `-Tag` and `-CreateMissingTags`.** `'Category=Tag'` pairs for every VM of the run, entered
+  in the planner as `Category = Tag` per line (also sent by the deployment server's web form). Checked right
+  after the vCenter connect, before anything is built: a missing category, a category that does not take
+  VMs, two tags in a single-cardinality category, or a missing tag stops the run. `-CreateMissingTags`
+  creates a missing tag inside its existing category; categories are never created. Tags are assigned right
+  after the VM is created.
+- **DRS VM groups: CSV column `vmgroup`.** The VM is added to the existing VM group of its cluster right after
+  it is created. The placement pre-check stops the run when the group does not exist.
+- **`-Replace` finds the old VM by IP.** The VM that VMware Tools report with the row's `ip` / `ip2`, or the VM
+  with the row's VM name, is the one replaced, so a proxy that gets a new name under a new naming standard is
+  still found. It is looked up before anything is released in the VBR; several matching VMs, or an address
+  that answers a ping while no VM reports it, stop the row with nothing changed. The old VM is shut down from
+  the guest (hard power-off after `-ReplaceShutdownTimeoutSec`, default 300 s) and renamed
+  `<old name>_ToBeDeleted` (was `<host>-old-<stamp>`), with the date appended when that name is taken. In the
+  VBR the old proxy is also found by the old VM's guest host name or VM name.
+- **Fix: CSV `dnssearch` on a single-adapter row stopped the appliance install.** anaconda refuses
+  `--ipv4-dns-search` without `--device` ("Option --ipv4-dns-search requires --device to be specified", the
+  installer terminates). The network line now gets `--device=link` (the first adapter with a link) when a
+  search domain is set; rows with a second adapter and the prompt ISO already named the device. Found in the
+  lab on 2026-10-28, the first run that filled `dnssearch`.
+- Parallel runs hand `-Tag` to the workers as one `;`-separated value (the first array parameter of the
+  script; a plain `[string]` conversion would have joined the pairs with spaces).
+
 - **Deployment server without xorriso or WSL: `Build-DeployServerIso.ps1 -NoXorriso`.** For build machines
   where xorriso can't be installed and WSL can't be turned on. The Rocky ISO stays untouched. `-OutIso` is a
   small second ISO labelled `OEMDRV` with only `ks.cfg` and the payload; the Rocky installer loads a kickstart

@@ -211,7 +211,16 @@
               <label class="f"><span class="l">Hostname pattern</span><input type="text" id="g_pattern" class="mono" value="{namespace}-{nn}" placeholder="{namespace}-{nn}"></label>
               <label class="f"><span class="l">Start index</span><input type="number" id="g_start" min="0" max="999" value="1"></label>
             </div>
-            <p class="hint"><code>{namespace}</code> = the free-text prefix on the left, so the customer's own naming standard applies (lower-cased; spaces and other characters not allowed in a host name become <code>-</code>). <code>{nn}</code> = two-digit index, <code>{nnn}</code> = three-digit, <code>{n}</code> = plain index. Optional: <code>{cluster}</code> (the VMware cluster below) and <code>{vbr}</code> (the VBR key). Add a domain suffix for FQDNs, e.g. <code>{namespace}-{nn}.corp.example</code>. Keep the part before the first dot within 15 characters (NetBIOS); the table warns when it is longer. The start index continues an existing series that matches the pattern.</p>
+            <div class="grid3">
+              <label class="f"><span class="l">Datacenter (optional)</span><input type="text" id="g_dc" class="mono" value="" placeholder="ros"></label>
+              <label class="f"><span class="l">Location (optional)</span><input type="text" id="g_loc" class="mono" value="" placeholder="vpr"></label>
+              <label class="f"><span class="l">Search domain (optional)</span><input type="text" id="g_domain" class="mono" value="" placeholder="corp.example"></label>
+            </div>
+            <div class="grid2">
+              <label class="f"><span class="l">VM name pattern (optional; empty = the hostname)</span><input type="text" id="g_vmpattern" class="mono" value="" placeholder="{datacenter}_km_{hostname}"></label>
+              <label class="f"><span class="l">VM/Host group (optional)</span><input type="text" id="g_vmgroup" class="mono" value="" placeholder="vmgr-{cluster}" list="dl_vmgroup"></label>
+            </div>
+            <p class="hint"><code>{namespace}</code> = the free-text prefix on the left, so the customer's own naming standard applies (in the hostname lower-cased; spaces and other characters not allowed in a host name become <code>-</code>). <code>{nn}</code> = two-digit index, <code>{nnn}</code> = three-digit, <code>{n}</code> = plain index. Optional: <code>{cluster}</code> (the VMware cluster below), <code>{vbr}</code> (the VBR key), <code>{datacenter}</code> and <code>{location}</code>. With a <b>search domain</b> the hostname stays a short name: the domain goes to <code>dnssearch</code> and the VBR registers <code>hostname.domain</code> (<code>vbrname</code>). Without one, add the domain to the pattern for FQDNs, e.g. <code>{namespace}-{nn}.corp.example</code>. The <b>VM name pattern</b> sets the name in vCenter (column <code>vmname</code>; underscores kept), e.g. <code>{datacenter}_km_{hostname}</code> gives <code>ros_km_vpr-nodspa0101</code> for the hostname pattern <code>{location}-{cluster}{nn}</code>. Literal text such as <code>km</code> is kept as typed. The <b>VM/Host group</b> is an existing DRS VM group of the cluster (column <code>vmgroup</code>); <code>{cluster}</code> is the cluster name, e.g. <code>vmgr-{cluster}</code>. Keep the part before the first dot within 15 characters (NetBIOS); the table warns when it is longer. The start index continues an existing series that matches the pattern.</p>
             <div class="grid2">
               <label class="f"><span class="l">First IP</span><input type="text" id="g_ip" class="mono" value="10.10.1.11" placeholder="10.10.1.11"></label>
               <label class="f"><span class="l">Netmask</span><input type="text" id="g_mask" class="mono" value="255.255.255.0"></label>
@@ -270,7 +279,7 @@
           <p>1. Build the fleet here. Fix every red issue; amber ones are judgement calls.</p>
           <p>2. Export the CSV and copy it, the base 13.1 ISO and one settings file per VBR to the deploy host.</p>
           <p>3. Run the generated <b>Validate</b> command first, then <b>What-if</b>, then the real run, one VBR at a time.</p>
-          <p>The CSV columns are exactly what <code>Deploy-VeeamProxies.ps1</code> reads. Optional columns are exported only when a row uses them: <code>ip2</code>, <code>netmask2</code>, <code>portgroup2</code> (a second network adapter with a static address and no default route; all three together), <code>gatewayrepo</code> (for role <code>gateway</code> or <code>viproxy+gateway</code>: existing Dell Data Domain / HPE StoreOnce repositories, <code>;</code>-separated, whose gateway server list gets this appliance), <code>dnssearch</code> (DNS search domains, <code>,</code>-separated, set on NIC 1), <code>handshakecode</code> (an appliance re-homed from another VBR) and <code>vbrname</code> (the FQDN or IP the VBR should use to add the proxy when it differs from the kickstart hostname, for example when DNS has no record yet).</p>
+          <p>The CSV columns are exactly what <code>Deploy-VeeamProxies.ps1</code> reads. Optional columns are exported only when a row uses them: <code>ip2</code>, <code>netmask2</code>, <code>portgroup2</code> (a second network adapter with a static address and no default route; all three together), <code>gatewayrepo</code> (for role <code>gateway</code> or <code>viproxy+gateway</code>: existing Dell Data Domain / HPE StoreOnce repositories, <code>;</code>-separated, whose gateway server list gets this appliance), <code>dnssearch</code> (DNS search domains, <code>,</code>-separated, set on NIC 1), <code>vmname</code> (the VM name in vCenter when it differs from the hostname), <code>vmgroup</code> (an existing DRS VM group of the cluster the VM is added to), <code>handshakecode</code> (an appliance re-homed from another VBR) and <code>vbrname</code> (the FQDN or IP the VBR should use to add the proxy when it differs from the kickstart hostname, for example when DNS has no record yet).</p>
         </div>
       </details>
     </div>
@@ -285,7 +294,7 @@
           <label class="btn fileb">Import CSV<input type="file" id="fileImport" accept=".csv,text/csv" aria-label="Import CSV file"></label>
           <button type="button" class="btn" id="btnPaste">Paste CSV</button>
           <button type="button" class="btn" id="btnSort">Sort by VBR, host</button>
-          <label class="small" style="display:inline-flex;gap:6px;align-items:center;"><input type="checkbox" id="showHs"> optional columns (handshakecode, vbrname, gatewayrepo, dnssearch, ip2, netmask2, portgroup2)</label>
+          <label class="small" style="display:inline-flex;gap:6px;align-items:center;"><input type="checkbox" id="showHs"> optional columns (vmname, vmgroup, handshakecode, vbrname, gatewayrepo, dnssearch, ip2, netmask2, portgroup2)</label>
           <button type="button" class="btn quiet danger" id="btnClear">Clear all</button>
         </div>
       </div>
@@ -301,7 +310,7 @@
               <th class="col-w-vbr">vbr</th><th class="col-w-host">hostname</th><th class="col-w-ip">ip</th><th class="col-w-mask">netmask</th>
               <th class="col-w-gw">gateway</th><th class="col-w-dns">dns</th><th class="col-w-cl">cluster</th><th class="col-w-ds">datastore</th>
               <th class="col-w-fold">folder</th><th class="col-w-pg">portgroup</th><th class="col-w-role">role</th><th class="col-w-tasks">tasks</th>
-              <th class="col-w-hs hs" hidden>handshakecode</th><th class="col-w-host hs" hidden>vbrname</th><th class="col-w-host hs" hidden>gatewayrepo</th><th class="col-w-host hs" hidden>dnssearch</th><th class="col-w-ip hs" hidden>ip2</th><th class="col-w-mask hs" hidden>netmask2</th><th class="col-w-pg hs" hidden>portgroup2</th><th class="ops"></th>
+              <th class="col-w-host hs" hidden>vmname</th><th class="col-w-host hs" hidden>vmgroup</th><th class="col-w-hs hs" hidden>handshakecode</th><th class="col-w-host hs" hidden>vbrname</th><th class="col-w-host hs" hidden>gatewayrepo</th><th class="col-w-host hs" hidden>dnssearch</th><th class="col-w-ip hs" hidden>ip2</th><th class="col-w-mask hs" hidden>netmask2</th><th class="col-w-pg hs" hidden>portgroup2</th><th class="ops"></th>
             </tr>
           </thead>
           <tbody id="fleetBody"></tbody>
@@ -362,12 +371,19 @@
         <label><input type="checkbox" id="c_isoonly"> <span>No vCenter access: build the ISO(s) only, someone else creates the VMs</span></label>
         <label><input type="checkbox" id="c_single" checked> <span>ISO only: one ISO for all nodes (pick the node in the boot menu)</span></label>
         <label><input type="checkbox" id="c_logs"> <span>Logs on disk 2: set the appliance's <b>Logs location</b> (Host Management Console setting) to the data volume on the extra disk, <code>/var/lib/veeam/VeeamBackupLogFolder</code>, instead of disk 1 <span class="small muted">(VBR "Export logs" does not collect them there - use the support bundle in the appliance web UI)</span></span></label>
-        <label><input type="checkbox" id="c_replace"> <span>Replace existing proxies: capture job pinning, remove from VBR, redeploy, re-pin (old VM is powered off and renamed)</span></label>
+        <label><input type="checkbox" id="c_replace"> <span>Replace existing proxies: capture job pinning, remove from VBR, redeploy, re-pin (the old VM, found by its IP or name, is shut down and renamed <code>&lt;name&gt;_ToBeDeleted</code>)</span></label>
         <label>While replacing, jobs pinned only to that proxy are <select id="c_replacePolicy"><option value="Auto">switched to automatic selection</option><option value="Disable">disabled until it is back</option></select></label>
         <label title="Deploy this many appliances at the same time (-Parallel). Each one runs as its own worker: own ISO build, upload, VM and registration; starts are 45 s apart. 1 = one after the other.">Appliances at a time <input type="number" id="c_par" min="1" max="16" value="1" style="width:4.5em"></label>
         <label>Transport <select id="c_tm"><option>Auto</option><option>HotAdd</option><option>Nbd</option><option>DirectStorageAccess</option></select></label>
         <label>Appliance role <select id="c_role"><option value="InfrastructureServerIscsi">Infrastructure Server with iSCSI/FC/NVMe-oF</option><option value="InfrastructureServer">Infrastructure Server</option></select></label>
         <label>Shell <select id="c_shell"><option value="bash">Linux deploy host (bash)</option><option value="pwsh">Windows (PowerShell)</option></select></label>
+      </div>
+      <div class="grid2">
+        <label class="f"><span class="l">vSphere tags for every VM of the run (one <code>Category = Tag</code> per line)</span><textarea id="c_tags" class="mono" rows="4" placeholder="Team = IT Operations&#10;Service = Veeam&#10;Role = Proxy"></textarea></label>
+        <div class="f"><span class="l">&nbsp;</span>
+          <label class="small" style="display:inline-flex;gap:6px;align-items:center;"><input type="checkbox" id="c_createTags"> <span>Create missing tags inside their existing category (never a new category)</span></label>
+          <span class="hint">Categories and tags are checked before anything is built; a missing one stops the run unless the box is ticked. The list is remembered in this browser. Not applied with "No vCenter access".</span>
+        </div>
       </div>
       <div id="cmdOut" style="display:grid;gap:16px;"></div>
       <p class="hint">Order per VBR: <b>Validate</b> (offline, also dry-runs the kickstart and grub patch when the ISO is present) → <b>What-if</b> (connects, changes nothing) → <b>Deploy + register</b>. With <b>No vCenter access</b>: Validate → build the ISO(s) → hand the ISO and the VM build sheet (<code>*-VM-SPEC.txt</code>) to the vSphere team → Register. Passwords are never in the commands: with a user name given, the script prompts for that password at run time; leave the user empty to be asked for both. Encrypted credential files (<code>Protect-DeploymentSecrets.ps1</code>) are the non-interactive alternative. The MFA seed file is only needed when the VBR service account is MFA-enforced.</p>
@@ -426,7 +442,7 @@
   </section>
 </main>
 
-<datalist id="dl_cluster"></datalist><datalist id="dl_datastore"></datalist><datalist id="dl_folder"></datalist><datalist id="dl_portgroup"></datalist>
+<datalist id="dl_vmgroup"><option value="vmgr-{cluster}"></option><option value="vmgu-{cluster}"></option></datalist><datalist id="dl_cluster"></datalist><datalist id="dl_datastore"></datalist><datalist id="dl_folder"></datalist><datalist id="dl_portgroup"></datalist>
 <div class="toast" id="toast" role="status"></div>
 
 <script>
@@ -438,8 +454,9 @@
   const GR = 'gatewayrepo';
   const DS = 'dnssearch';
   const IP2 = 'ip2', NM2 = 'netmask2', PG2 = 'portgroup2';
+  const VM = 'vmname', VG = 'vmgroup';                 // VM name in vCenter (naming standard) and DRS VM group
   const NIC2 = [IP2, NM2, PG2];                       // second network adapter: all three or none
-  const OPTIONAL = [HS, VN, GR, DS, IP2, NM2, PG2];
+  const OPTIONAL = [VM, VG, HS, VN, GR, DS, IP2, NM2, PG2];
   const ROLES = ['viproxy', 'gateway'];
   // Veeam Software Appliance roles: a whole backup server / Enterprise Manager, built from the
   // VeeamSoftwareAppliance ISO (boot entry picks the product), never combined, never registered to a VBR.
@@ -447,7 +464,7 @@
   const isVsa = (r) => roleParts(r.role).some(x => VSA_ROLES.includes(x));
   const groupIsVsa = (k) => { const rs = state.rows.filter(r => (r.vbr || '(no vbr)') === k); return rs.length > 0 && rs.every(isVsa); };
   const roleParts = (role) => (role || '').toLowerCase().split(/[+;, ]+/).filter(Boolean);
-  const MONO = new Set(['vbr','hostname','ip','netmask','gateway','dns','tasks',HS,VN,DS,IP2,NM2]);
+  const MONO = new Set(['vbr','hostname','ip','netmask','gateway','dns','tasks',VM,VG,HS,VN,DS,IP2,NM2]);
   const LS_KEY = 'veeam-fleet-planner-v1';
   const LISTS = { cluster: 'dl_cluster', datastore: 'dl_datastore', folder: 'dl_folder', portgroup: 'dl_portgroup' };
   let inv = null;   // vSphere inventory loaded from the deployment server (not persisted)
@@ -464,8 +481,9 @@
   // ---------- persistence (per-viewer convenience only) ----------
   function save() {
     try {
-      const cmd = { csv: $('c_csv').value, iso: $('c_iso').value, vc: $('c_vc').value, vcuser: $('c_vcuser').value, dns: $('c_dns').value, tls: $('c_tls').checked, rb: $('c_rb').checked, isoOnly: $('c_isoonly').checked, single: $('c_single').checked, logs: $('c_logs').checked, tm: $('c_tm').value, role: $('c_role').value, shell: $('c_shell').value, par: $('c_par').value };
-      localStorage.setItem(LS_KEY, JSON.stringify({ rows: state.rows, vbrs: state.vbrs, sizing: state.sizing, showHs: state.showHs, example: state.example, cmd }));
+      const cmd = { csv: $('c_csv').value, iso: $('c_iso').value, vc: $('c_vc').value, vcuser: $('c_vcuser').value, dns: $('c_dns').value, tls: $('c_tls').checked, rb: $('c_rb').checked, isoOnly: $('c_isoonly').checked, single: $('c_single').checked, logs: $('c_logs').checked, tm: $('c_tm').value, role: $('c_role').value, shell: $('c_shell').value, par: $('c_par').value, tags: $('c_tags').value, createTags: $('c_createTags').checked };
+      const gen = Object.fromEntries(GEN_KEEP.map(id => [id, $(id).value]));
+      localStorage.setItem(LS_KEY, JSON.stringify({ rows: state.rows, vbrs: state.vbrs, sizing: state.sizing, showHs: state.showHs, example: state.example, cmd, gen }));
     } catch (e) { /* storage unavailable: fine */ }
   }
   function load() {
@@ -478,10 +496,13 @@
       state.vbrs = d.vbrs || {};
       state.sizing = Object.assign({ cpu: 6, ram: 12, disk: 120, data: 0 }, d.sizing || {});
       state.showHs = !!d.showHs; state.example = !!d.example;
-      if (d.cmd) { $('c_par').value = d.cmd.par || '1'; $('c_csv').value = d.cmd.csv || 'proxies.csv'; $('c_iso').value = d.cmd.iso || ''; $('c_vc').value = d.cmd.vc || ''; $('c_vcuser').value = d.cmd.vcuser || ''; $('c_dns').value = d.cmd.dns || ''; $('c_tls').checked = !!d.cmd.tls; $('c_rb').checked = !!d.cmd.rb; $('c_isoonly').checked = !!d.cmd.isoOnly; $('c_single').checked = d.cmd.single !== false; $('c_logs').checked = !!d.cmd.logs; $('c_tm').value = d.cmd.tm || 'Auto'; $('c_role').value = d.cmd.role || 'InfrastructureServerIscsi'; $('c_shell').value = d.cmd.shell || 'bash'; }
+      if (d.cmd) { $('c_par').value = d.cmd.par || '1'; $('c_csv').value = d.cmd.csv || 'proxies.csv'; $('c_iso').value = d.cmd.iso || ''; $('c_vc').value = d.cmd.vc || ''; $('c_vcuser').value = d.cmd.vcuser || ''; $('c_dns').value = d.cmd.dns || ''; $('c_tls').checked = !!d.cmd.tls; $('c_rb').checked = !!d.cmd.rb; $('c_isoonly').checked = !!d.cmd.isoOnly; $('c_single').checked = d.cmd.single !== false; $('c_logs').checked = !!d.cmd.logs; $('c_tm').value = d.cmd.tm || 'Auto'; $('c_role').value = d.cmd.role || 'InfrastructureServerIscsi'; $('c_shell').value = d.cmd.shell || 'bash'; $('c_tags').value = d.cmd.tags || ''; $('c_createTags').checked = !!d.cmd.createTags; }
+      if (d.gen) for (const id of GEN_KEEP) if (typeof d.gen[id] === 'string') $(id).value = d.gen[id];
       return true;
     } catch (e) { return false; }
   }
+  // Generator naming fields kept between visits (a customer's naming standard is typed once).
+  const GEN_KEEP = ['g_namespace', 'g_pattern', 'g_dc', 'g_loc', 'g_domain', 'g_vmpattern', 'g_vmgroup'];
   function normRow(r) { const o = {}; for (const k of SCHEMA) o[k] = (r[k] ?? '').toString().trim(); for (const k of OPTIONAL) o[k] = (r[k] ?? '').toString().trim(); return o; }
 
   // ---------- IPv4 helpers ----------
@@ -497,7 +518,7 @@
     const rows = state.rows;
     const addrCount = new Map(); rows.forEach(r => [r.ip, r[IP2]].filter(Boolean).forEach(a => addrCount.set(a, (addrCount.get(a) || 0) + 1)));
     const perRow = rows.map(() => ({ bad: [], warn: [] }));
-    const hostSeen = new Map(), ipSeen = new Map();
+    const hostSeen = new Map(), ipSeen = new Map(), vmSeen = new Map();
     rows.forEach((r, i) => {
       const P = perRow[i];
       for (const k of ['vbr','hostname','ip','netmask','gateway','cluster','datastore','portgroup']) if (!r[k]) P.bad.push(`${k} is empty`);
@@ -544,6 +565,13 @@
       else if (isVsa(r)) P.warn.push('tasks is ignored for a Software Appliance row');
       else if (!r.tasks || !Number.isInteger(t) || t < 1 || t > 100) P.bad.push('tasks must be an integer 1–100');
       else if (t > state.sizing.cpu * 2) P.warn.push(`tasks ${t} is more than 2× the ${state.sizing.cpu} vCPU sizing (heavy oversubscription)`);
+      if (r[VM]) {
+        if (r[VM].length > 80) P.bad.push('vmname is longer than 80 characters (vCenter limit)');
+        if (/[%\/\\]/.test(r[VM])) P.bad.push("vmname contains '%', '/' or '\\' (vCenter stores them escaped)");
+      }
+      const vmKey = (r[VM] || r.hostname || '').toLowerCase();
+      if (vmKey) { if (vmSeen.has(vmKey) && vmSeen.get(vmKey) !== i) { P.bad.push(`duplicate VM name "${r[VM] || r.hostname}" (also row ${vmSeen.get(vmKey) + 1})`); } else vmSeen.set(vmKey, i); }
+      if (r[VG] && inv && Array.isArray(inv.vmGroups) && !inv.vmGroups.some(g => g.cluster === r.cluster && g.name === r[VG])) P.bad.push(`VM group "${r[VG]}" is not in cluster "${r.cluster}" in the loaded vCenter inventory`);
       if (r[HS] && !/^\d{6}$/.test(r[HS])) P.bad.push('handshakecode must be 6 digits');
       if (r[VN] && !(isIPv4(r[VN]) || isHost(r[VN]))) P.bad.push('vbrname must be an FQDN or IPv4 address the VBR can reach');
       if (r[DS]) { const bad = r[DS].split(/[,; ]+/).filter(d => d && !isHost(d)); if (bad.length) P.bad.push(`dnssearch has invalid domain names: ${bad.join(', ')}`); }
@@ -572,6 +600,8 @@
       const tr = document.createElement('tr'); tr.dataset.i = i;
       tr.innerHTML = `<td class="n">${i + 1}</td><td class="st"><span class="chip" tabindex="0">…</span></td>` +
         SCHEMA.map(k => `<td><input type="text" data-i="${i}" data-k="${k}" class="${MONO.has(k) ? 'mono' : ''}" value="${esc(r[k])}" aria-label="${k} row ${i + 1}"${LISTS[k] ? ` list="${LISTS[k]}"` : ''}></td>`).join('') +
+        `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${VM}" class="mono" value="${esc(r[VM])}" aria-label="vmname row ${i + 1}" placeholder="(= hostname)"></td>` +
+        `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${VG}" class="mono" value="${esc(r[VG])}" aria-label="vmgroup row ${i + 1}" placeholder="(none)"></td>` +
         `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${HS}" class="mono" value="${esc(r[HS])}" aria-label="handshakecode row ${i + 1}" placeholder="000000"></td>` +
         `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${VN}" class="mono" value="${esc(r[VN])}" aria-label="vbrname row ${i + 1}" placeholder="(defaults to hostname)"></td>` +
         `<td class="hs" ${state.showHs ? '' : 'hidden'}><input type="text" data-i="${i}" data-k="${GR}" value="${esc(r[GR])}" aria-label="gatewayrepo row ${i + 1}" placeholder="(gateway rows: DD / StoreOnce repos)"></td>` +
@@ -719,6 +749,13 @@
   }
 
   // ---------- commands ----------
+  // 'Category = Tag' lines -> ['Category=Tag', ...]; invalid lines are reported, not sent.
+  function tagPairs() {
+    const lines = $('c_tags').value.split(/\r?\n|;/).map(l => l.trim()).filter(Boolean);
+    return { ok: lines.filter(l => /^[^=]+=[^=]+$/.test(l)).map(l => l.replace(/\s*=\s*/, '=')), bad: lines.filter(l => !/^[^=]+=[^=]+$/.test(l)) };
+  }
+  // One single-quoted shell argument for bash or PowerShell.
+  const shq = (v, bash) => bash ? `'${v.replace(/'/g, `'\\''`)}'` : `'${v.replace(/'/g, "''")}'`;
   function renderCommands() {
     const out = $('cmdOut'); out.innerHTML = '';
     const g = groups();
@@ -726,6 +763,9 @@
     const bash = $('c_shell').value === 'bash';
     const pfx = bash ? './' : '.\\', cont = bash ? ' \\\n  ' : ' `\n  ', invoke = bash ? 'pwsh -File ./Deploy-VeeamProxies.ps1' : 'pwsh -File .\\Deploy-VeeamProxies.ps1';
     const tm = $('c_tm').value, role = $('c_role').value, isoOnly = $('c_isoonly').checked;
+    const tp = tagPairs();
+    const tagArg = tp.ok.length ? `${cont}-Tag ${shq(tp.ok.join(';'), bash)}${$('c_createTags').checked ? ' -CreateMissingTags' : ''}` : '';
+    if (tp.bad.length) out.insertAdjacentHTML('beforeend', `<p class="small"><span class="chip bad">Tag lines need the form "Category = Tag": ${esc(tp.bad.join(' | '))}</span></p>`);
     const parN = Math.min(16, Math.max(1, parseInt($('c_par').value, 10) || 1)), par = parN > 1 ? ` -Parallel ${parN}` : '';
     if (parN > 1 && $('c_replace').checked) out.insertAdjacentHTML('beforeend', `<p class="small"><span class="chip bad">Replace runs one proxy at a time: set "Appliances at a time" to 1 for a Replace run (parallel job re-pinning would overwrite itself).</span></p>`);
     // VM hardware + disk layout: only when not the script defaults (6 / 12 / 120, single disk).
@@ -744,7 +784,7 @@
         // Software Appliance group: Stage A only, product sizing from the script, the VSA ISO as base.
         const viso = /SoftwareAppliance/i.test(iso) ? iso : '<VeeamSoftwareAppliance_13.1.x.iso>';
         const va = `${base}${cont}-ApplianceSecretsFile ${pfx}${sec}${cont}-BaseIso ${pfx}${viso} -ValidateOnly`;
-        const vc1 = `${base}${cont}-vCenterServer ${vc}${vcUser ? ' -vCenterUser ' + vcUser : ''} -BaseIso ${pfx}${viso}${cont}-ApplianceSecretsFile ${pfx}${sec}`;
+        const vc1 = `${base}${cont}-vCenterServer ${vc}${vcUser ? ' -vCenterUser ' + vcUser : ''} -BaseIso ${pfx}${viso}${cont}-ApplianceSecretsFile ${pfx}${sec}${tagArg}`;
         const vsteps = isoOnly
           ? [['1 · Validate (offline)', va], ['2 · Build one ISO per appliance + VM build sheet (no vCenter, output in iso-out/)', `${base}${cont}-IsoOnly -BaseIso ${pfx}${viso}${cont}-ApplianceSecretsFile ${pfx}${sec}`]]
           : [['1 · Validate (offline)', va], ['2 · What-if (connects to vCenter, changes nothing)', `${vc1} -WhatIf`], ['3 · Deploy (no VBR registration: these ARE the servers)', `${vc1}${$('c_rb').checked ? ' -RollbackOnFailure' : ''}${par}`]];
@@ -759,8 +799,10 @@
       const a = `${base}${cont}-ApplianceSecretsFile ${pfx}${sec}${cont}-BaseIso ${pfx}${iso} -ValidateOnly${hw}`;
       const common = `${base}${cont}-vCenterServer ${vc}${vcUser ? ' -vCenterUser ' + vcUser : ''} -BaseIso ${pfx}${iso}${cont}-ApplianceSecretsFile ${pfx}${sec}${cont}-VBRServer ${vbr}${v.user ? ' -VBRUser ' + v.user : ''}` +
         ($('c_tls').checked ? ' -SkipTlsVerify' : '') + (v.mfa ? `${cont}-VBRMfaSecretFile ${pfx}${v.mfa}` : '') +
-        (tm !== 'Auto' ? ` -TransportMode ${tm}` : '') + (role !== 'InfrastructureServerIscsi' ? ` -ApplianceRole ${role}` : '') + hw;
-      const dnsCmd = dns ? `pwsh -File .\\New-ProxyDnsRecords.ps1 -CsvPath .\\${csv} -Vbr ${k} -DnsServer ${dns} -Credential (Get-Credential) -WhatIf   # then without -WhatIf` : null;
+        (tm !== 'Auto' ? ` -TransportMode ${tm}` : '') + (role !== 'InfrastructureServerIscsi' ? ` -ApplianceRole ${role}` : '') + hw + tagArg;
+      // Short hostnames + a search domain: the A records go into that zone (= the vbrname FQDN the VBR registers).
+      const kr = state.rows.filter(r => r.vbr === k), zone = kr.every(r => r.hostname && !r.hostname.includes('.')) && kr[0] && kr[0][DS] ? kr[0][DS].split(/[,; ]+/)[0] : '';
+      const dnsCmd = dns ? `pwsh -File .\\New-ProxyDnsRecords.ps1 -CsvPath .\\${csv} -Vbr ${k} -DnsServer ${dns}${zone ? ' -ZoneName ' + zone : ''} -Credential (Get-Credential) -WhatIf   # then without -WhatIf` : null;
       const b = `${common} -WhatIf`;
       const c = `${common}${$('c_rb').checked ? ' -RollbackOnFailure' : ''}${$('c_replace').checked ? ' -Replace' + ($('c_replacePolicy').value === 'Disable' ? ' -ReplaceJobPolicy Disable' : '') : par}`;
       // No vCenter access: build the ISO(s) + VM build sheet here, register once the VMs are up.
@@ -786,15 +828,24 @@
   // {vbr} stay available as optional tokens. Every token is made host-name safe.
   const DEFAULT_PATTERN = '{namespace}-{nn}';
   const hostToken = s => String(s || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
-  function expandPattern(pattern, n, v) {
-    return pattern.replace(/\{namespace\}/g, hostToken(v.namespace)).replace(/\{cluster\}/g, hostToken(v.cluster)).replace(/\{vbr\}/g, hostToken(v.vbr))
-      .replace(/\{nnn\}/g, String(n).padStart(3, '0')).replace(/\{nn\}/g, String(n).padStart(2, '0')).replace(/\{n\}/g, String(n));
+  // VM names follow vCenter's rules, not DNS: underscores and case stay; only spaces and '%', '/', '\' are replaced.
+  const vmToken = s => String(s || '').trim().replace(/[\s%\/\\]+/g, '-');
+  const TOKENS = ['namespace', 'cluster', 'vbr', 'datacenter', 'location'];
+  function expandPattern(pattern, n, v, tok = hostToken) {
+    let out = pattern;
+    for (const t of TOKENS) out = out.replace(new RegExp('\\{' + t + '\\}', 'g'), tok(v[t]));
+    return out.replace(/\{nnn\}/g, String(n).padStart(3, '0')).replace(/\{nn\}/g, String(n).padStart(2, '0')).replace(/\{n\}/g, String(n));
   }
+  // VM name pattern: the hostname tokens (raw) plus {hostname} = the generated (short) hostname.
+  const expandVmPattern = (pattern, n, v, hostname) => expandPattern(pattern.replace(/\{hostname\}/g, '\u0000H\u0000'), n, v, vmToken).replace(/\u0000H\u0000/g, hostname);
+  const genVals = (over) => Object.assign({ namespace: $('g_namespace').value, vbr: $('g_vbr').value.trim(), cluster: $('g_cluster').value, datacenter: $('g_dc').value, location: $('g_loc').value }, over || {});
   // Next free index for this pattern among the rows already in the table, so a second batch for the
   // same cluster continues at 03 instead of restarting at 01. Null when no row matches the pattern.
   function nextIndexFor(pattern, v) {
     const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const src = esc(pattern).replace(/\\\{namespace\\\}/g, esc(hostToken(v.namespace))).replace(/\\\{cluster\\\}/g, esc(hostToken(v.cluster))).replace(/\\\{vbr\\\}/g, esc(hostToken(v.vbr))).replace(/\\\{nnn?\\\}|\\\{n\\\}/g, '(\\d+)');
+    let src = esc(pattern);
+    for (const t of TOKENS) src = src.split(esc('{' + t + '}')).join(esc(hostToken(v[t])));
+    src = src.replace(/\\\{nnn?\\\}|\\\{n\\\}/g, '(\\d+)');
     const re = new RegExp('^' + src + '$', 'i');
     const m = state.rows.map(r => (r.hostname || '').match(re)).filter(Boolean).map(x => parseInt(x[1], 10)).filter(Number.isFinite);
     return m.length ? Math.max(...m) + 1 : null;
@@ -807,10 +858,18 @@
     const ip20 = $('g_ip2').value.trim();
     const base2 = isIPv4(ip20) ? ip2int(ip20) : null;
     const rows = [];
+    const vmPattern = $('g_vmpattern').value.trim(), domain = $('g_domain').value.trim().replace(/^\.+|\.+$/g, '');
+    const vmGroup = $('g_vmgroup').value.trim().replace(/\{cluster\}/g, $('g_cluster').value.trim());
     for (let i = 0; i < count; i++) {
       const n = start + i;
+      const v = genVals({ vbr });
+      const hostname = expandPattern(pattern, n, v);
+      // Search domain: the hostname stays short; the domain is the DNS search domain and the VBR registers the FQDN.
+      const short = domain && !hostname.includes('.');
       rows.push(normRow({
-        vbr, hostname: expandPattern(pattern, n, { namespace: $('g_namespace').value, vbr, cluster: $('g_cluster').value }),
+        vbr, hostname,
+        [VM]: vmPattern ? expandVmPattern(vmPattern, n, v, hostname) : '', [VG]: vmGroup,
+        [DS]: domain, [VN]: short && !roleParts($('g_role').value).some(x => VSA_ROLES.includes(x)) ? `${hostname}.${domain}` : '',
         ip: base === null ? ip0 : int2ip((base + i) >>> 0), netmask: $('g_mask').value, gateway: $('g_gw').value, dns: $('g_dns').value,
         cluster: $('g_cluster').value, datastore: $('g_ds').value, folder: $('g_folder').value, portgroup: $('g_pg').value, role: $('g_role').value,
         tasks: roleParts($('g_role').value).includes('viproxy') ? $('g_tasks').value : '',
@@ -822,7 +881,8 @@
   }
   function genPreview() {
     const r = genRows(); const f = r[0], l = r[r.length - 1];
-    $('genPreview').textContent = r.length === 1 ? `Will add ${f.hostname} (${f.ip})` : `Will add ${r.length} nodes: ${f.hostname} (${f.ip}) … ${l.hostname} (${l.ip})`;
+    const nm = (x) => x[VM] ? `${x.hostname} (VM ${x[VM]}, ${x.ip})` : `${x.hostname} (${x.ip})`;
+    $('genPreview').textContent = (r.length === 1 ? `Will add ${nm(f)}` : `Will add ${r.length} nodes: ${nm(f)} … ${nm(l)}`) + (f[VG] ? ` · VM group ${f[VG]}` : '') + (f[VN] ? ` · registered as ${f[VN]}` : '');
   }
 
   // ---------- misc ----------
@@ -841,24 +901,24 @@
 
   // ---------- events ----------
   $('genForm').addEventListener('submit', (e) => { e.preventDefault(); const r = genRows(); state.rows.push(...r); if (r.some(x => OPTIONAL.some(k => x[k]))) { state.showHs = true; $('showHs').checked = true; } state.example = false; $('exampleBanner').hidden = true; renderTable(); toast(`Added ${r.length} node${r.length > 1 ? 's' : ''}.`); });
-  $('genForm').addEventListener('input', genPreview);
+  $('genForm').addEventListener('input', () => { genPreview(); save(); });
   const syncGwRepo = () => { $('g_gwrepo_f').hidden = !roleParts($('g_role').value).includes('gateway'); };
   $('g_role').addEventListener('change', syncGwRepo); syncGwRepo();
   $('btnFillFromRow').addEventListener('click', () => {
     const k = $('g_vbr').value.trim(); const r = state.rows.find(x => x.vbr === k) || state.rows[state.rows.length - 1];
     if (!r) { toast('No rows to copy from.'); return; }
-    $('g_mask').value = r.netmask; $('g_gw').value = r.gateway; $('g_dns').value = r.dns; $('g_cluster').value = r.cluster; $('g_ds').value = r.datastore; $('g_folder').value = r.folder; $('g_pg').value = r.portgroup; $('g_tasks').value = r.tasks || 12; $('g_mask2').value = r[NM2] || ''; $('g_pg2').value = r[PG2] || '';
+    $('g_mask').value = r.netmask; $('g_gw').value = r.gateway; $('g_dns').value = r.dns; $('g_cluster').value = r.cluster; $('g_ds').value = r.datastore; $('g_folder').value = r.folder; $('g_pg').value = r.portgroup; $('g_tasks').value = r.tasks || 12; $('g_mask2').value = r[NM2] || ''; $('g_pg2').value = r[PG2] || ''; if (r[DS]) $('g_domain').value = r[DS].split(/[,; ]+/)[0];
     const last = state.rows.filter(x => x.vbr === r.vbr && isIPv4(x.ip)).map(x => ip2int(x.ip)).sort((a, b) => a - b).pop();
     if (last !== undefined) $('g_ip').value = int2ip((last + 1) >>> 0);
-    const next = nextIndexFor($('g_pattern').value.trim() || DEFAULT_PATTERN, { namespace: $('g_namespace').value, vbr: k, cluster: r.cluster });
+    const next = nextIndexFor($('g_pattern').value.trim() || DEFAULT_PATTERN, genVals({ vbr: k, cluster: r.cluster }));
     if (next !== null) $('g_start').value = next;
     else { const m = state.rows.filter(x => x.vbr === r.vbr).map(x => (x.hostname.match(/(\d+)(?=\D*$)/) || [])[1]).filter(Boolean).map(Number); if (m.length) $('g_start').value = Math.max(...m) + 1; }
     genPreview(); toast(`Settings copied from ${r.vbr}.`);
   });
   // Changing the cluster, the pattern or the VBR key re-derives the start index from the rows that
   // already follow that pattern (only when some do; a fresh series keeps the typed value).
-  ['g_namespace', 'g_cluster', 'g_pattern', 'g_vbr'].forEach(id => $(id).addEventListener('change', () => {
-    const next = nextIndexFor($('g_pattern').value.trim() || DEFAULT_PATTERN, { namespace: $('g_namespace').value, vbr: $('g_vbr').value.trim(), cluster: $('g_cluster').value });
+  ['g_namespace', 'g_cluster', 'g_pattern', 'g_vbr', 'g_dc', 'g_loc'].forEach(id => $(id).addEventListener('change', () => {
+    const next = nextIndexFor($('g_pattern').value.trim() || DEFAULT_PATTERN, genVals());
     if (next !== null) { $('g_start').value = next; genPreview(); }
   }));
   ['s_cpu', 's_ram', 's_disk', 's_data'].forEach(id => $(id).addEventListener('input', () => { state.sizing = { cpu: +$('s_cpu').value || 6, ram: +$('s_ram').value || 12, disk: +$('s_disk').value || 120, data: Math.max(0, +$('s_data').value || 0) }; refresh(); }));
@@ -891,7 +951,7 @@
     document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
     toast(`Downloading ${a.download}. If nothing happens (sandboxed viewer), use Copy CSV.`);
   });
-  ['c_csv', 'c_iso', 'c_vc', 'c_vcuser', 'c_dns', 'c_tls', 'c_rb', 'c_isoonly', 'c_single', 'c_logs', 'c_replace', 'c_replacePolicy', 'c_tm', 'c_role', 'c_shell', 'c_par'].forEach(id => $(id).addEventListener('input', () => { renderCommands(); save(); }));
+  ['c_csv', 'c_iso', 'c_vc', 'c_vcuser', 'c_dns', 'c_tls', 'c_rb', 'c_isoonly', 'c_single', 'c_logs', 'c_replace', 'c_replacePolicy', 'c_tm', 'c_role', 'c_shell', 'c_par', 'c_tags', 'c_createTags'].forEach(id => $(id).addEventListener('input', () => { renderCommands(); save(); }));
   ['cmdOut', 'reportWrap'].forEach(id => $(id).addEventListener('click', (e) => { const b = e.target.closest('button[data-copy]'); if (!b) return; const pre = b.parentElement.nextElementSibling; if (pre) copyText(pre.textContent); }));
   document.querySelectorAll('[data-theme-choice]').forEach(b => b.addEventListener('click', () => setTheme(b.dataset.themeChoice)));
 
@@ -975,7 +1035,8 @@
     }[mode];
     if (warn && !confirm(warn)) return;
     if (!vsaRun && $('c_replace').checked && (parseInt($('c_par').value, 10) || 1) > 1 && ['Full', 'RegisterOnly', 'WhatIf'].includes(mode)) { toast('Replace runs one proxy at a time: set "Appliances at a time" to 1.'); return; }
-    if (!vsaRun && $('c_replace').checked && ['Full', 'RegisterOnly', 'WhatIf'].includes(mode) && !confirm('Replace mode: proxies in this CSV that already exist in the VBR are removed from it (their job pinning is captured first and restored after), their VMs are powered off and renamed, and fresh appliances take their names and IPs. Continue?')) return;
+    if (!vsaRun && $('c_replace').checked && ['Full', 'RegisterOnly', 'WhatIf'].includes(mode) && !confirm('Replace mode: proxies in this CSV that already exist in the VBR are removed from it (their job pinning is captured first and restored after). The old VMs - found by the row IP or VM name - are shut down and renamed <name>_ToBeDeleted, and fresh appliances take their IPs. Continue?')) return;
+    if (tagPairs().bad.length) { toast('Fix the tag lines first (form: Category = Tag).'); return; }
     const body = {
       csv: buildCsv(vbr), vbr, mode, iso: $('r_iso').value, settingsFile: $('r_settings').value,
       vcenter: { server: $('r_vc').value.trim(), user: $('r_vcuser').value.trim(), password: $('r_vcpass').value },
@@ -983,6 +1044,7 @@
       transportMode: $('c_tm').value, applianceRole: $('c_role').value, rollbackOnFailure: $('c_rb').checked, skipTls: $('c_tls').checked,
       parallel: Math.min(16, Math.max(1, parseInt($('c_par').value, 10) || 1)),
       replace: $('c_replace').checked, replaceJobPolicy: $('c_replacePolicy').value,
+      tags: tagPairs().ok.join('\n'), createMissingTags: $('c_createTags').checked,
       vmCpu: state.sizing.cpu, vmMemoryGB: state.sizing.ram, vmDiskGB: state.sizing.disk, dataDiskGB: state.sizing.data || 0,
       logsOnDataDisk: !!(state.sizing.data && $('c_logs').checked),
     };
