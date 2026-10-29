@@ -56,6 +56,9 @@
     Optional columns: vbrname, handshakecode, gatewayrepo, dnssearch (DNS search domains, ','-separated),
     and ip2 + netmask2 + portgroup2 (a second network adapter: static address, no gateway, no default
     route; all three together).
+    vmname: the VM name in vCenter when it differs from the hostname, e.g. a naming standard such as
+    'ros_km_vpr-nodspa0101' for hostname 'vpr-nodspa0101' (underscores allowed; empty = the hostname).
+    vmgroup: an existing DRS VM group in the row's cluster (VM/Host Groups) the new VM is added to.
 
 .PARAMETER Vbr
     The owning VBR key to process (matches the CSV 'vbr' column). Use '*' to process every row.
@@ -199,14 +202,29 @@
 .PARAMETER RollbackOnFailure
     Auto-clean a row (delete its VM / remove from VBR) if that row fails mid-deploy.
 
+.PARAMETER Tag
+    vSphere tags for every VM of the run, as 'Category=Tag' pairs: an array, or one string with the pairs
+    separated by ';' (e.g. 'Team=IT Operations;Service=Veeam;Role=Proxy'). Checked right after the vCenter
+    connect, before any ISO is built: a missing category or tag stops the run. Assigned right after the VM
+    is created, so a VM that fails later still carries them.
+
+.PARAMETER CreateMissingTags
+    With -Tag: create a tag that does not exist yet inside its (existing) category instead of stopping -
+    e.g. a new admin's account under 'Provisioned By'. Categories are never created.
+
 .PARAMETER Replace
     Redeploy over a proxy that already exists in VBR (same name/IP) WITHOUT losing its place in the
     backup and replication jobs, or in the gateway server lists of Data Domain / StoreOnce repositories. The VBR keeps the old appliance identity under that name, so a fresh
     appliance can only be added after the old object is removed - and removing a proxy drops it from
     every job that pins it. Per row: capture the proxy's settings and every job list that pins it
-    (manifest '<host>.replace.json' in the staging dir), unpin, remove proxy + managed server, power
-    off and rename the old VM ('<host>-old-<stamp>'), deploy + register the new appliance, re-pin the
-    jobs with the new proxy id, re-enable what was disabled, delete the manifest. If the run is
+    (manifest '<host>.replace.json' in the staging dir), unpin, remove proxy + managed server, shut
+    down and rename the old VM ('<old name>_ToBeDeleted'), deploy + register the new appliance, re-pin the
+    jobs with the new proxy id, re-enable what was disabled, delete the manifest.
+    The old VM is the one VMware Tools report with the row's ip (or ip2), or the VM with the row's VM
+    name - so a proxy renamed to a new naming standard is still found. Several matching VMs, or an address
+    that answers a ping while no VM reports it, stop the row before anything is released. Guest shutdown
+    first, hard power-off after -ReplaceShutdownTimeoutSec. In the VBR the old proxy is found by the row's
+    registration name, its ip, or the old VM's guest host name / VM name. If the run is
     interrupted after the release step, rerun with -Replace (-SkipDeploy) and the manifest on disk is
     restored. REST path only. With -RegisterVia Cmdlet or -SkipRegister the script refuses.
 
@@ -218,6 +236,9 @@
 
 .PARAMETER PurgeOldVm
     With -Replace: delete the old VM immediately instead of powering it off and renaming it.
+
+.PARAMETER ReplaceShutdownTimeoutSec
+    With -Replace: how long the guest shutdown of the old VM may take before a hard power-off (default 300).
 
 .PARAMETER ReportPath
     Path for the run-report CSV. Defaults to .\DeployReport_<vbr>_<timestamp>.csv
@@ -352,6 +373,10 @@ param(
     # -NoSecureBoot only for troubleshooting.
     [switch]$NoSecureBoot,
     [int]$GrubTimeout = 5,
+    # vSphere tags for every VM of the run ('Category=Tag'; array or one ';'-separated string) and whether a
+    # missing tag may be created inside its existing category. Pre-checked before any ISO is built.
+    [string[]]$Tag = @(),
+    [switch]$CreateMissingTags,
 
     # --- Appliance readiness gate (Host Management Console HTTPS) --------------
     [int]$HmcPort = 10443,
@@ -418,6 +443,7 @@ param(
     [switch]$Replace,
     [ValidateSet('Auto', 'Disable')][string]$ReplaceJobPolicy = 'Auto',
     [switch]$PurgeOldVm,
+    [ValidateRange(30, 3600)][int]$ReplaceShutdownTimeoutSec = 300,
 
     [string]$ReportPath,
 
@@ -883,6 +909,21 @@ function Get-RegistrationName {
         return ([string]$Row.vbrname).Trim()
     }
     return $Row.hostname
+}
+
+function Get-RowVmName {
+    # VM name in vCenter: optional CSV column 'vmname' (a naming standard that differs from the host name,
+    # underscores allowed); otherwise the hostname, as before.
+    param($Row)
+    if ($Row.PSObject.Properties['vmname'] -and -not [string]::IsNullOrWhiteSpace([string]$Row.vmname)) { return ([string]$Row.vmname).Trim() }
+    return [string]$Row.hostname
+}
+
+function Get-RowVmGroup {
+    # Optional CSV column 'vmgroup': an existing DRS VM group in the row's cluster.
+    param($Row)
+    if ($Row.PSObject.Properties['vmgroup'] -and -not [string]::IsNullOrWhiteSpace([string]$Row.vmgroup)) { return ([string]$Row.vmgroup).Trim() }
+    return $null
 }
 
 function Resolve-HandshakeCode {
@@ -1407,11 +1448,13 @@ function Save-ReplaceManifest {
 function Get-ReplaceManifest {
     # Capture everything needed to put the new proxy back where the old one was. Written to disk BEFORE
     # anything is removed. Returns $null when the row is not registered in this VBR.
-    param($Row)
-    $regName = Get-RegistrationName -Row $Row
-    $hostId = Find-VbrRestManagedServer -Name $regName
-    if (-not $hostId -and $Row.ip) { $hostId = Find-VbrRestManagedServer -Name ([string]$Row.ip) }
+    # -AltNames: the old VM's guest host name and VM name - the old proxy may be registered under its old name.
+    param($Row, [string[]]$AltNames = @())
+    $regName = $null; $hostId = $null
+    $tried = @(@(Get-RegistrationName -Row $Row; [string]$Row.ip) + @($AltNames) | Where-Object { $_ } | Select-Object -Unique)
+    foreach ($n in $tried) { $hostId = Find-VbrRestManagedServer -Name $n; if ($hostId) { $regName = $n; break } }
     if (-not $hostId) { return $null }
+    if ($regName -ne (Get-RegistrationName -Row $Row)) { Write-Log "Replace: the old proxy is registered in the VBR as '$regName'." 'INFO' }
     $proxyId = Find-VbrRestProxyByHost -HostId $hostId
     $settings = $null; $refs = @()
     if ($proxyId) {
@@ -1523,24 +1566,83 @@ function Invoke-ReplaceRestore {
     return [pscustomobject]@{ Jobs = $n; Gateways = $g }
 }
 
-function Move-ReplacedVmAside {
-    # -Replace: the VM with this name is the proxy being replaced. Power it off and rename it (kept for a
-    # rollback window) or delete it (-PurgeOldVm), so the new VM can take the name and the IP address.
+function Find-ReplaceTargetVm {
+    # -Replace: the VM being replaced is the one VMware Tools report with the row's ip / ip2, or the VM that
+    # already carries the row's VM name. A new naming standard may give the proxy another name than the old
+    # VM, so the address is the key. Runs BEFORE anything is released in the VBR: several VMs, or an address
+    # that answers a ping while no VM reports it, stop the row with nothing changed. $null = nothing to replace.
+    param($Row)
+    $vmName = Get-RowVmName -Row $Row
+    $addrs = @([string]$Row.ip); $n2 = Get-RowNic2 -Row $Row; if ($n2) { $addrs += $n2.Ip }
+    $addrs = @($addrs | Where-Object { $_ })
+    $hits = @(foreach ($v in @(Get-View -ViewType VirtualMachine -Property Name, Guest.IpAddress, Guest.Net, Guest.HostName, Runtime.PowerState)) {
+        $ips = [System.Collections.Generic.List[string]]::new()
+        if ($v.Guest) {
+            if ($v.Guest.IpAddress) { $ips.Add([string]$v.Guest.IpAddress) }
+            foreach ($nic in @($v.Guest.Net)) { if ($nic -and $nic.IpAddress) { foreach ($a in @($nic.IpAddress)) { $ips.Add([string]$a) } } }
+        }
+        $byIp = @($ips | Where-Object { $_ -in $addrs } | Sort-Object -Unique)
+        if ($v.Name -eq $vmName -or $byIp.Count) {
+            [pscustomobject]@{ View = $v; Why = $(if ($byIp.Count) { "reports $($byIp -join ', ')" } else { 'has the VM name' }) }
+        }
+    })
+    if ($hits.Count -gt 1) {
+        throw ("Replace: {0} VMs match row '{1}' ({2}) - not guessing which one to shut down. Nothing was changed." -f $hits.Count, $Row.hostname,
+               (($hits | ForEach-Object { "'$($_.View.Name)' $($_.Why)" }) -join '; '))
+    }
+    if (-not $hits.Count) {
+        foreach ($a in $addrs) {
+            $up = $false
+            try { $up = [bool](Test-Connection -TargetName $a -Count 2 -TimeoutSeconds 1 -Quiet -ErrorAction Stop) } catch { $up = $false }
+            if ($up) { throw "Replace: $a answers a ping, but no VM in vCenter reports it (another device, or a VM without VMware Tools) - not deploying into an address conflict. Nothing was changed." }
+        }
+        Write-Log "Replace: no VM in vCenter has '$vmName' or reports $($addrs -join ' / ') - nothing to shut down (a powered-off VM reports no address)." 'INFO'
+        return $null
+    }
+    $vm = Get-VIObjectByVIView -VIView $hits[0].View
+    Write-Log "Replace: old VM for '$($Row.hostname)' is '$($vm.Name)' ($($vm.PowerState); $($hits[0].Why))." 'INFO'
+    return $vm
+}
+
+function Stop-ReplacedVm {
+    # Guest shutdown when VMware Tools run, hard power-off when the guest is not off within the timeout.
     [CmdletBinding(SupportsShouldProcess = $true)]
-    param($Vm, [string]$Hostname)
+    param($Vm)
+    if ($Vm.PowerState -ne 'PoweredOn' -or -not $PSCmdlet.ShouldProcess($Vm.Name, 'shut down the old VM')) { return }
+    if ([string]$Vm.ExtensionData.Guest.ToolsRunningStatus -eq 'guestToolsRunning') {
+        Stop-VMGuest -VM $Vm -Confirm:$false | Out-Null
+        Write-Log "Replace: guest shutdown of '$($Vm.Name)' requested (up to $ReplaceShutdownTimeoutSec s)." 'INFO'
+        $deadline = (Get-Date).AddSeconds($ReplaceShutdownTimeoutSec)
+        do { Start-Sleep -Seconds 10; $Vm = Get-VM -Id $Vm.Id } while ($Vm.PowerState -ne 'PoweredOff' -and (Get-Date) -lt $deadline)
+        if ($Vm.PowerState -eq 'PoweredOff') { Write-Log "Replace: '$($Vm.Name)' shut down." 'OK'; return }
+        Write-Log "Replace: '$($Vm.Name)' is not off after $ReplaceShutdownTimeoutSec s - hard power-off." 'WARN'
+    }
+    else { Write-Log "Replace: VMware Tools are not running in '$($Vm.Name)' - hard power-off." 'WARN' }
+    Stop-VM -VM $Vm -Confirm:$false | Out-Null
+}
+
+function Move-ReplacedVmAside {
+    # -Replace: the old VM (Find-ReplaceTargetVm) is shut down and renamed '<old name>_ToBeDeleted' (kept for
+    # a rollback window), or deleted with -PurgeOldVm, so the new VM can take the name and the address.
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param($Vm)
+    $oldName = $Vm.Name
     if ($PurgeOldVm) {
-        if ($PSCmdlet.ShouldProcess($Hostname, 'power off + DELETE the old VM (-PurgeOldVm)')) {
-            if ($Vm.PowerState -eq 'PoweredOn') { Stop-VM -VM $Vm -Confirm:$false | Out-Null }
-            Remove-VM -VM $Vm -DeletePermanently -Confirm:$false
-            Write-Log "Replace: old VM '$Hostname' deleted (-PurgeOldVm)." 'WARN'
+        if ($PSCmdlet.ShouldProcess($oldName, 'power off + DELETE the old VM (-PurgeOldVm)')) {
+            Stop-ReplacedVm -Vm $Vm
+            Remove-VM -VM (Get-VM -Id $Vm.Id) -DeletePermanently -Confirm:$false
+            Write-Log "Replace: old VM '$oldName' deleted (-PurgeOldVm)." 'WARN'
         }
         return
     }
-    $newName = "{0}-old-{1}" -f $Hostname, (Get-Date).ToString('yyyyMMdd-HHmm')
-    if ($PSCmdlet.ShouldProcess($Hostname, "power off + rename the old VM to '$newName'")) {
-        if ($Vm.PowerState -eq 'PoweredOn') { Stop-VM -VM $Vm -Confirm:$false | Out-Null }
-        Set-VM -VM $Vm -Name $newName -Confirm:$false | Out-Null
-        Write-Log "Replace: old VM powered off and renamed to '$newName' - delete it once the new proxy has proven itself." 'WARN'
+    # A leftover '<name>_ToBeDeleted' from an earlier replace gets a date suffix instead of a failed rename.
+    $newName = "${oldName}_ToBeDeleted"
+    if (@(Get-VM -Name $newName -ErrorAction SilentlyContinue).Count) { $newName = "${oldName}_ToBeDeleted_$((Get-Date).ToString('yyyyMMdd'))" }
+    if (@(Get-VM -Name $newName -ErrorAction SilentlyContinue).Count) { $newName = "${oldName}_ToBeDeleted_$((Get-Date).ToString('yyyyMMdd-HHmm'))" }
+    if ($PSCmdlet.ShouldProcess($oldName, "shut down + rename the old VM to '$newName'")) {
+        Stop-ReplacedVm -Vm $Vm
+        Set-VM -VM (Get-VM -Id $Vm.Id) -Name $newName -Confirm:$false | Out-Null
+        Write-Log "Replace: old VM '$oldName' is off and renamed to '$newName' - delete it once the new proxy has proven itself." 'WARN'
     }
 }
 
@@ -1611,6 +1713,15 @@ function Import-DeploymentCsv {
             throw ("Duplicate ip '{0}' in CSV (rows '{1}' and '{2}') - every appliance needs its own address." -f $r.ip, $seen[$ipKey], $r.hostname)
         }
         if ($r.ip) { $seen[$ipKey] = $r.hostname }
+        # vmname: vCenter allows almost anything, but '%', '/' and '\' are stored escaped (a VM then shows up
+        # as '%25' etc.), and 80 characters is the limit. Unique like the hostname: it is how the VM is found.
+        $vn = Get-RowVmName -Row $r
+        if ($vn -ne [string]$r.hostname) {
+            if ($vn.Length -gt 80 -or $vn -match '[%/\\]') { throw "Row '$($r.hostname)': vmname '$vn' must be at most 80 characters without '%', '/' or '\'." }
+        }
+        $vnKey = 'vm:' + $vn.ToLowerInvariant()
+        if ($seen.ContainsKey($vnKey)) { throw ("Duplicate VM name '{0}' in CSV (rows '{1}' and '{2}')." -f $vn, $seen[$vnKey], $r.hostname) }
+        $seen[$vnKey] = $r.hostname
         if ($r.PSObject.Properties['dnssearch'] -and $r.dnssearch) {
             foreach ($d in (([string]$r.dnssearch) -split '[,; ]+' | Where-Object { $_ })) {
                 if ($d -notmatch '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$') { throw "Row '$($r.hostname)': dnssearch '$d' is not a valid domain name." }
@@ -2188,6 +2299,10 @@ function Get-PatchedApplianceConfigs {
     $rxNet = [regex]'(?m)^[ \t]*network[ \t]+--bootproto=\S+.*$'
     if (-not $rxNet.IsMatch($ksText)) { throw "No 'network --bootproto=...' line found in /$KickstartName - the VIA kickstart layout changed; inspect $exKs." }
     $nic2 = if ($prompt) { $null } else { Get-RowNic2 -Row $Row }
+    # anaconda refuses --ipv4-dns-search without --device ("Option --ipv4-dns-search requires --device to be
+    # specified", installer terminates; lab 2026-10-28). Two-NIC and prompt lines name the device below; a
+    # single adapter takes 'link' (the first adapter with a link), as the deployment server's own kickstart.
+    if ($srch -and -not $nic2 -and $netLine -notmatch '--device=') { $netLine = $netLine.Replace('--bootproto=static', '--bootproto=static --device=link') }
     if ($prompt) {
         # Generic ISO: ask for name + network on the console before the VIA writes its network file.
         $rxCat = [regex]'(?m)^[ \t]*cat[ \t]*<<[ \t]*EOF[ \t]*>[ \t]*/tmp/pre-network\.cfg[ \t]*$'
@@ -2486,7 +2601,7 @@ function Write-IsoVmSpec {
         $n2 = Get-RowNic2 -Row $_.Row
         $sz = Get-RowVmSize -Row $_.Row
         [pscustomobject][ordered]@{
-            vm_name = $_.Row.hostname; ip = $_.Row.ip; ip2 = $(if ($n2) { $n2.Ip } else { '' }); iso = (Split-Path $_.Iso -Leaf); boot_entry = $_.Boot
+            vm_name = (Get-RowVmName -Row $_.Row); ip = $_.Row.ip; ip2 = $(if ($n2) { $n2.Ip } else { '' }); iso = (Split-Path $_.Iso -Leaf); boot_entry = $_.Boot
             cluster = $_.Row.cluster; datastore = $_.Row.datastore; folder = $_.Row.folder; portgroup = $_.Row.portgroup; portgroup2 = $(if ($n2) { $n2.PortGroup } else { '' })
             role = $_.Row.role; vcpu = $sz.Cpu; memory_gb = $sz.MemoryGB; disk1_gb = $sz.DiskGB; disk2_gb = $(if ($sz.MultiDisk) { $sz.DataDiskGB } else { '' })
         }
@@ -2730,6 +2845,16 @@ function Test-VspherePlacement {
             $missing.Add("port group '$p'$hint")
         }
     }
+    # DRS VM groups (CSV vmgroup) must exist in the row's cluster: the VM is added right after it is created.
+    foreach ($pair in @($Rows | Where-Object { Get-RowVmGroup -Row $_ } | ForEach-Object { "$($_.cluster)|$(Get-RowVmGroup -Row $_)" } | Sort-Object -Unique)) {
+        $c, $g = $pair -split '\|', 2
+        $cl = Get-Cluster -Name $c -ErrorAction SilentlyContinue
+        if (-not $cl) { continue }   # reported as a missing cluster above
+        if (-not @(Get-DrsClusterGroup -Cluster $cl -Type VMGroup -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $g }).Count) {
+            $have = @(Get-DrsClusterGroup -Cluster $cl -Type VMGroup -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+            $missing.Add("VM group '$g' in cluster '$c' (VM groups there: $(if ($have.Count) { $have -join ', ' } else { 'none' }))")
+        }
+    }
     if ($missing.Count) {
         $show = { param($items) $a = @($items | Sort-Object -Unique); $s = ($a | Select-Object -First 25) -join ', '; if ($a.Count -gt 25) { $s += ", ... ($($a.Count) total)" }; $s }
         $avail = "Available - clusters: $(& $show (Get-Cluster | Select-Object -ExpandProperty Name)); " +
@@ -2739,7 +2864,56 @@ function Test-VspherePlacement {
                  "port groups: $(& $show (Get-AllPortGroupNames))"
         throw "vSphere placement check failed - not found in vCenter: $($missing -join '; '). Fix the CSV (the planner can load the inventory for you). $avail"
     }
-    Write-Log "vSphere placement check passed for $($Rows.Count) row(s): clusters, datastores, folders and port groups all exist." 'OK'
+    Write-Log "vSphere placement check passed for $($Rows.Count) row(s): clusters, datastores, folders, port groups$(if (@($Rows | Where-Object { Get-RowVmGroup -Row $_ }).Count) { ', VM groups' }) all exist." 'OK'
+}
+
+function ConvertTo-TagPairs {
+    # -Tag values -> @{ Category; Name }. Accepts an array or one string separated by ';' or new lines; under
+    # 'pwsh -File' an array arrives as ONE comma-joined string, so a comma also splits when it is followed by
+    # the next 'Category=' (commas inside a tag name stay).
+    param([string[]]$Value)
+    foreach ($it in @($Value | ForEach-Object { [string]$_ -split '\s*(?:;|\r?\n|,(?=[^,;=]+=))\s*' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+        $i = $it.IndexOf('=')
+        if ($i -lt 1 -or $i -ge $it.Length - 1) { throw "-Tag '$it' is not 'Category=Tag'." }
+        [pscustomobject]@{ Category = $it.Substring(0, $i).Trim(); Name = $it.Substring($i + 1).Trim() }
+    }
+}
+
+function Resolve-VsphereTags {
+    # -Tag pre-check, right after Connect-VIServer and BEFORE any ISO is built: every category must exist and
+    # take VMs; a missing tag stops the run, or with -CreateMissingTags is created inside its category (never
+    # a category). -ReadOnly (ValidateOnly) only reports. Returns the tag objects to assign to each new VM.
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Parameter(Mandatory)][object[]]$Pairs, [switch]$ReadOnly)
+    $tags = [System.Collections.Generic.List[object]]::new(); $problems = [System.Collections.Generic.List[string]]::new()
+    $allCats = @(Get-TagCategory -ErrorAction Stop)
+    foreach ($grp in @($Pairs | Group-Object Category)) {
+        $cat = $allCats | Where-Object { $_.Name -eq $grp.Name } | Select-Object -First 1
+        if (-not $cat) { $problems.Add("tag category '$($grp.Name)' does not exist (categories are never created)"); continue }
+        $types = @($cat.EntityType | ForEach-Object { [string]$_ })
+        if ($types.Count -and -not @($types | Where-Object { $_ -in @('All', 'VirtualMachine') }).Count) { $problems.Add("tag category '$($cat.Name)' cannot be used on VMs (it is for: $($types -join ', '))") }
+        $names = @($grp.Group | ForEach-Object { $_.Name } | Sort-Object -Unique)
+        if ([string]$cat.Cardinality -eq 'Single' -and $names.Count -gt 1) { $problems.Add("tag category '$($cat.Name)' allows one tag per VM, $($names.Count) given ($($names -join ', '))") }
+        $have = @(Get-Tag -Category $cat -ErrorAction SilentlyContinue)
+        foreach ($n in $names) {
+            $t = $have | Where-Object { $_.Name -eq $n } | Select-Object -First 1
+            if (-not $t) {
+                if (-not $CreateMissingTags) { $problems.Add("tag '$n' does not exist in category '$($cat.Name)' (create it in vCenter, or use -CreateMissingTags)"); continue }
+                if ($ReadOnly) { Write-Log "Tag '$n' does not exist in category '$($cat.Name)' yet - a run with -CreateMissingTags creates it." 'INFO'; continue }
+                if (-not $PSCmdlet.ShouldProcess("$($cat.Name) / $n", 'create vSphere tag (-CreateMissingTags)')) { continue }
+                try { $t = New-Tag -Name $n -Category $cat -Description 'Created by Deploy-VeeamProxies.ps1 (-CreateMissingTags)' -ErrorAction Stop; Write-Log "Created tag '$n' in category '$($cat.Name)'." 'OK' }
+                catch {
+                    # A parallel worker may have created it a moment ago.
+                    $t = @(Get-Tag -Category $cat -ErrorAction SilentlyContinue) | Where-Object { $_.Name -eq $n } | Select-Object -First 1
+                    if (-not $t) { $problems.Add("tag '$n' in category '$($cat.Name)' could not be created: $($_.Exception.Message)"); continue }
+                }
+            }
+            $tags.Add($t)
+        }
+    }
+    if ($problems.Count) { throw "vSphere tag check failed: $($problems -join '; '). Nothing was built." }
+    Write-Log ("vSphere tag check passed: {0}." -f (($Pairs | ForEach-Object { "$($_.Category)=$($_.Name)" }) -join ', ')) 'OK'
+    return , $tags.ToArray()
 }
 
 function Save-VmConsoleScreenshot {
@@ -2770,15 +2944,17 @@ function Invoke-StageA-Deploy {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter(Mandatory)]$Row,
-        [Parameter(Mandatory)][string]$IsoPath
+        [Parameter(Mandatory)][string]$IsoPath,
+        $OldVm                                  # -Replace: the VM being replaced (Find-ReplaceTargetVm), shut down + renamed here
     )
 
-    Write-Log "Stage A: deploying '$($Row.hostname)' -> cluster '$($Row.cluster)' / datastore '$($Row.datastore)'" 'STEP'
+    $vmName = Get-RowVmName -Row $Row
+    Write-Log "Stage A: deploying '$($Row.hostname)'$(if ($vmName -ne $Row.hostname) { " (VM '$vmName')" }) -> cluster '$($Row.cluster)' / datastore '$($Row.datastore)'" 'STEP'
 
-    $existingVm = Get-VM -Name $Row.hostname -ErrorAction SilentlyContinue
-    if ($existingVm) {
-        if ($Replace) { Move-ReplacedVmAside -Vm $existingVm -Hostname $Row.hostname }
-        else { throw "A VM named '$($Row.hostname)' already exists in vCenter (use -Replace to redeploy over it)." }
+    if ($OldVm) { Move-ReplacedVmAside -Vm $OldVm }
+    if (-not $WhatIfPreference -or -not $OldVm) {
+        $existingVm = Get-VM -Name $vmName -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $vmName }
+        if ($existingVm) { throw "A VM named '$vmName' already exists in vCenter$(if ($Replace) { ' and it is not the VM being replaced' } else { ' (use -Replace to redeploy over it)' })." }
     }
 
     # Least-loaded host in the cluster (simple memory balance).
@@ -2819,7 +2995,7 @@ function Invoke-StageA-Deploy {
             if (-not $pg2) { throw "Port group '$($nic2.PortGroup)' (CSV portgroup2) not found on host $($vmhost.Name) (standard) or as a distributed port group." }
         }
         $newVmParams = @{
-            Name              = $Row.hostname
+            Name              = $vmName
             VMHost            = $vmhost
             Datastore         = $storage
             DiskGB            = $size.DiskGB
@@ -2849,6 +3025,19 @@ function Invoke-StageA-Deploy {
         # disk.EnableUUID lets VBR match the proxy VM to the managed server (HotAdd on Linux proxies).
         New-AdvancedSetting -Entity $vm -Name 'disk.EnableUUID' -Value 'TRUE' -Confirm:$false -Force | Out-Null
 
+        # -Tag and CSV vmgroup: right after the VM exists (both pre-checked), so a VM that fails later still has them.
+        if ($script:VmTags -and $script:VmTags.Count) {
+            foreach ($t in $script:VmTags) { New-TagAssignment -Tag $t -Entity $vm -Confirm:$false | Out-Null }
+            Write-Log "Tagged '$vmName': $(($script:VmTags | ForEach-Object { "$($_.Category.Name)=$($_.Name)" }) -join ', ')." 'OK'
+        }
+        $vmGroup = Get-RowVmGroup -Row $Row
+        if ($vmGroup) {
+            $grp = Get-DrsClusterGroup -Cluster (Get-Cluster -Name $Row.cluster) -Type VMGroup | Where-Object { $_.Name -eq $vmGroup } | Select-Object -First 1
+            if (-not $grp) { throw "VM group '$vmGroup' not found in cluster '$($Row.cluster)'." }
+            Set-DrsClusterGroup -DrsClusterGroup $grp -VM $vm -Add -Confirm:$false | Out-Null
+            Write-Log "Added '$vmName' to VM group '$vmGroup'." 'OK'
+        }
+
         # Second adapter after the first: adapter order = PCI order = the order the kickstart names them in.
         if ($pg2) {
             New-NetworkAdapter -VM $vm -Portgroup $pg2 -Type Vmxnet3 -StartConnected -Confirm:$false | Out-Null
@@ -2863,7 +3052,7 @@ function Invoke-StageA-Deploy {
         # Attach the per-node ISO to the CD drive New-VM created (-CD) and boot it.
         Get-CDDrive -VM $vm | Set-CDDrive -IsoPath $isoDsPath -StartConnected:$true -Confirm:$false | Out-Null
         Start-VM -VM $vm -Confirm:$false | Out-Null
-        Write-Log "Created + powered on '$($Row.hostname)' on host $($vmhost.Name) (UEFI, Secure Boot $(if ($NoSecureBoot) { 'OFF' } else { 'ON' })); booting unattended installer." 'OK'
+        Write-Log "Created + powered on '$vmName' on host $($vmhost.Name) (UEFI, Secure Boot $(if ($NoSecureBoot) { 'OFF' } else { 'ON' })); booting unattended installer." 'OK'
 
         # Wait for unattended install + first boot (HMC answering), give veeam-init.service time to
         # apply the answer file, then detach + delete the secrets-bearing ISO. On a timeout, grab the
@@ -2875,7 +3064,7 @@ function Invoke-StageA-Deploy {
             if ($vsa) { Wait-VsaService -Row $Row -Product $vsa -TimeoutSec $IsoReadyTimeoutSec -PollSec $IsoReadyPollSec | Out-Null }
         }
         catch {
-            $shotPath = Save-VmConsoleScreenshot -Vm (Get-VM -Name $Row.hostname -ErrorAction SilentlyContinue) -OutDir (Split-Path -Parent $IsoPath) -Name $Row.hostname
+            $shotPath = Save-VmConsoleScreenshot -Vm (Get-VM -Id $vm.Id -ErrorAction SilentlyContinue) -OutDir (Split-Path -Parent $IsoPath) -Name $Row.hostname
             if ($shotPath) { Write-Log "Console screenshot of '$($Row.hostname)' saved to $shotPath for troubleshooting." 'WARN' }
             throw
         }
@@ -2989,8 +3178,9 @@ function Get-ExistingTargetConflicts {
     foreach ($r in $Rows) {
         $why = [System.Collections.Generic.List[string]]::new()
         if ($CheckVm) {
-            $vm = Get-VM -Name $r.hostname -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($vm) { $why.Add(("a VM named '{0}' already exists in vCenter ({1}, folder '{2}')" -f $r.hostname, $vm.PowerState, $vm.Folder.Name)) }
+            $vn = Get-RowVmName -Row $r
+            $vm = Get-VM -Name $vn -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $vn } | Select-Object -First 1
+            if ($vm) { $why.Add(("a VM named '{0}' already exists in vCenter ({1}, folder '{2}')" -f $vn, $vm.PowerState, $vm.Folder.Name)) }
         }
         if ($CheckVbr -and -not (Get-RowVsaProduct -Row $r)) {
             $regName = Get-RegistrationName -Row $r
@@ -3050,11 +3240,12 @@ function Invoke-Rollback {
 
     if ($IncludeVBR) { Remove-RowFromVbr -Row $Row }
 
-    $vm = Get-VM -Name $Row.hostname -ErrorAction SilentlyContinue
-    if ($vm -and $PSCmdlet.ShouldProcess($Row.hostname, "Power off + delete VM")) {
+    $vn = Get-RowVmName -Row $Row
+    $vm = Get-VM -Name $vn -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $vn } | Select-Object -First 1
+    if ($vm -and $PSCmdlet.ShouldProcess($vn, "Power off + delete VM")) {
         if ($vm.PowerState -eq 'PoweredOn') { Stop-VM -VM $vm -Confirm:$false | Out-Null }
         Remove-VM -VM $vm -DeletePermanently -Confirm:$false
-        Write-Log "Deleted VM '$($Row.hostname)'." 'OK'
+        Write-Log "Deleted VM '$vn'." 'OK'
     }
 
     # ISO cleanup (datastore copy + staged file), best-effort.
@@ -3127,6 +3318,7 @@ function Invoke-ParallelRun {
         $v = $script:BoundParams[$k]
         if ($v -is [System.Management.Automation.SwitchParameter]) { if ($v.IsPresent) { $base.Add("-$k") } }
         elseif ($v -is [bool]) { if ($v) { $base.Add("-$k") } }
+        elseif ($v -is [array]) { if ($v.Count) { $base.Add("-$k"); $base.Add(($v -join $(if ($k -eq 'Tag') { ';' } else { ',' }))) } }   # [string] of an array joins with spaces
         else { $base.Add("-$k"); $base.Add([string]$v) }
     }
     # Values the run itself settled (defaults the operator did not pass, the VSA settings) go explicitly.
@@ -3185,6 +3377,12 @@ try {
     if ($PromptIso -and -not $IsoOnly) { throw "-PromptIso works together with -IsoOnly only (it builds one generic ISO that asks for name and network at install time)." }
     if ($PromptIso -and $SingleIso) { throw "-PromptIso and -SingleIso are two different ISO types - pick one: -SingleIso bakes every CSV row into a boot menu, -PromptIso asks at install time." }
     if ($SingleIso -and -not $IsoOnly) { throw "-SingleIso works together with -IsoOnly only (a full run builds, uploads and removes one ISO per node)." }
+    $script:TagPairs = @(ConvertTo-TagPairs -Value $Tag)   # syntax only; existence is checked after the vCenter connect
+    $script:VmTags = @()
+    if ($CreateMissingTags -and -not $script:TagPairs.Count) { throw "-CreateMissingTags needs -Tag." }
+    if ($IsoOnly -and ($script:TagPairs.Count -or @($rows | Where-Object { Get-RowVmGroup -Row $_ }).Count)) {
+        Write-Log "-IsoOnly: whoever creates the VMs sets the vSphere tags and VM groups (-Tag / CSV vmgroup are not applied)." 'WARN'
+    }
     if ($IsoOnly -and ($SkipDeploy -or $ValidateOnly -or $Rollback -or $Replace)) {
         throw "-IsoOnly only builds ISOs; it cannot be combined with -SkipDeploy, -ValidateOnly, -Rollback or -Replace."
     }
@@ -3334,7 +3532,10 @@ try {
         }
         $vcConn = Connect-VIServer -Server $vCenterServer -Credential $vCenterCredential
         Write-Log "Connected to vCenter $vCenterServer." 'OK'
-        if ($needDeploy) { Test-VspherePlacement -Rows $rows }   # fail fast on CSV placement typos
+        if ($needDeploy) {
+            Test-VspherePlacement -Rows $rows   # fail fast on CSV placement typos (and missing VM groups)
+            if ($script:TagPairs.Count) { $script:VmTags = Resolve-VsphereTags -Pairs $script:TagPairs }
+        }
     }
     # DNS preflight for the names the VBR will use - every registering mode, incl. register-only (warning only).
     if ($needRegister -and -not $ValidateOnly) { Test-RegistrationNames -Rows $rows }
@@ -3387,6 +3588,10 @@ try {
             catch { Write-Log "ValidateOnly: could not connect to VBR $VBRServer for the name check - $($_.Exception.Message)" 'WARN' }
         }
         if ($vcOk -or $vbrOk) {
+            if ($vcOk) {
+                try { Test-VspherePlacement -Rows $rows } catch { Write-Log "ValidateOnly: $($_.Exception.Message)" 'WARN' }
+                if ($script:TagPairs.Count) { try { $null = Resolve-VsphereTags -Pairs $script:TagPairs -ReadOnly } catch { Write-Log "ValidateOnly: $($_.Exception.Message)" 'WARN' } }
+            }
             $script:PreCheck = Get-ExistingTargetConflicts -Rows $rows -CheckVm:$vcOk -CheckVbr:$vbrOk
             $where = (@($(if ($vcOk) { 'vCenter' }), $(if ($vbrOk) { 'the VBR' })) | Where-Object { $_ }) -join ' and '
             if ($script:PreCheck.Count) { Write-Log "ValidateOnly: $($script:PreCheck.Count) row(s) use a name that is already taken in $where - a deploy would skip them (see below)." 'WARN' }
@@ -3468,6 +3673,8 @@ try {
                 if ($gwRepos.Count) { $as += ' (gateway of: ' + ($gwRepos -join ', ') + ')' }
                 $sz = Get-RowVmSize -Row $row
                 $hw = "$($sz.Cpu) vCPU/$($sz.MemoryGB) GB/$($sz.DiskGB) GB$(if ($sz.MultiDisk) { " + $($sz.DataDiskGB) GB" })"
+                $vn = Get-RowVmName -Row $row; $vg = Get-RowVmGroup -Row $row
+                $hw = "$(if ($vn -ne $row.hostname) { "'$vn', " })$hw$(if ($vg) { ", VM group $vg" })$(if ($script:TagPairs.Count) { ", $($script:TagPairs.Count) tag(s)" })"
                 $entry.validate = if (Get-RowVsaProduct -Row $row) { "would build ISO ($(Get-RowKickstart -Row $row)) + create UEFI VM ($hw) on $($row.cluster)/$($row.datastore) as $as; no registration" }
                                   else { "would build ISO + create UEFI VM ($hw) on $($row.cluster)/$($row.datastore); register to $($row.vbr) via $RegisterVia as $as" }
                 Write-Log "VALIDATE '$($row.hostname)': $($entry.validate)" 'INFO'
@@ -3482,8 +3689,11 @@ try {
             else {
                 # --- Replace: capture + release BEFORE the new appliance is built ---
                 $manifest = $null
+                # Find the VM being replaced FIRST: its safety checks must stop the row before the VBR is touched.
+                $oldVm = if ($Replace -and $needDeploy) { Find-ReplaceTargetVm -Row $row } else { $null }
                 if ($Replace -and $needRegister) {
-                    $manifest = Get-ReplaceManifest -Row $row
+                    $alt = @(); if ($oldVm) { $alt = @([string]$oldVm.ExtensionData.Guest.HostName, [string]$oldVm.Name) }
+                    $manifest = Get-ReplaceManifest -Row $row -AltNames $alt
                     if ($manifest) { Invoke-ReplaceRelease -Manifest $manifest }
                     else {
                         $mp = Get-ReplaceManifestPath -Row $row
@@ -3497,7 +3707,7 @@ try {
                 if ($needDeploy) {
                     $isoPath = New-ApplianceIso -Row $row -BaseIso $BaseIso -OutDir $IsoStagingDir -SharedArtifacts $script:IsoWorkspace
                     $script:Owned.StagedIso = $isoPath
-                    Invoke-StageA-Deploy -Row $row -IsoPath $isoPath
+                    Invoke-StageA-Deploy -Row $row -IsoPath $isoPath -OldVm $oldVm
                     $entry.deploy = 'ok'
                     $vsaP = Get-RowVsaProduct -Row $row
                     if ($vsaP) {

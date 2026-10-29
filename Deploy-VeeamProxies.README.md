@@ -353,7 +353,9 @@ vbr02,prx-vbr02-01,10.10.2.11,255.255.255.0,10.10.2.1,10.10.2.53,CL-Prod02,DS-Ba
 | `tasks` | B | Concurrent proxy task slots (`maxTaskCount` / `-MaxTasks`, 1-100). Leave empty on a `gateway`-only row. |
 | `gatewayrepo` | B | *Optional, gateway rows only.* Names of existing Dell Data Domain / HPE StoreOnce repositories, `;`-separated. The appliance is added to each one's gateway server list. REST path only. |
 | `handshakecode` | B | *Optional.* Pairing code for an appliance that was previously paired to a **different** VBR. Fresh appliances need none (`000000`). |
-| `vbrname` | B | *Optional.* FQDN or IP the VBR should use to add the proxy when it differs from the kickstart hostname, for example when DNS has no record yet. Defaults to `hostname`. |
+| `vbrname` | B | *Optional.* FQDN or IP the VBR should use to add the proxy when it differs from the kickstart hostname, for example when DNS has no record yet, or `hostname.<search domain>` when `hostname` is a short name. Defaults to `hostname`. |
+| `vmname` | A | *Optional.* The VM name in vCenter when it follows another naming standard than the host name, e.g. `ros_km_vpr-nodspa0101` for hostname `vpr-nodspa0101`. Underscores are allowed; at most 80 characters, no `%`, `/` or `\`; unique. Empty = `hostname`. |
+| `vmgroup` | A | *Optional.* An existing DRS VM group (cluster → Configure → VM/Host Groups) in the row's cluster. The VM is added right after it is created. Checked before anything is built. |
 | `ip2` `netmask2` `portgroup2` | A | *Optional, all three together.* A second network adapter: the VM gets adapter 2 on `portgroup2`, the installer gives it a static address with no gateway, no DNS and no default route (NIC 1 keeps the only default route). Typical use: a backup / storage network. See §4d. |
 
 ## 2a. Gateway servers for deduplicating storage (`role` = `gateway`)
@@ -452,7 +454,10 @@ Things to check (from the Data Domain and StoreOnce pages of the user guide):
 | `-ParallelStaggerSec` | `45` | Seconds between the starts of the first N workers (spreads ISO uploads and logins). |
 | `-Replace` | off | Redeploy over a proxy that already exists in VBR and keep its job assignments: capture the job lists that pin it, remove it, move the old VM aside, deploy + register the new appliance, re-pin (§4b). REST path only. |
 | `-ReplaceJobPolicy` | `Auto` | While the proxy is rebuilt, jobs pinned only to it switch to automatic proxy selection (`Auto`) or are disabled and re-enabled afterwards (`Disable`). |
-| `-PurgeOldVm` | off | With `-Replace`: delete the old VM instead of powering it off and renaming it `<host>-old-<stamp>`. |
+| `-PurgeOldVm` | off | With `-Replace`: delete the old VM instead of shutting it down and renaming it `<old name>_ToBeDeleted`. |
+| `-ReplaceShutdownTimeoutSec` | `300` | With `-Replace`: how long the guest shutdown of the old VM may take before a hard power-off. |
+| `-Tag` | — | vSphere tags for every VM of the run, `'Category=Tag'` pairs: an array or one string separated by `;`, e.g. `-Tag 'Team=IT Operations;Service=Veeam;Role=Proxy'`. Categories and tags are checked before anything is built; a missing one stops the run. Assigned right after the VM is created. Not applied with `-IsoOnly`. |
+| `-CreateMissingTags` | off | With `-Tag`: create a missing tag inside its existing category (e.g. a new admin under *Provisioned By*) instead of stopping. Categories are never created. |
 | `-ReportPath` | *next to CSV* | Run-report CSV. |
 | `-WhatIf` | — | Dry-run every state-changing action. |
 
@@ -560,8 +565,16 @@ that more than "run the row again":
    automatic selection, or the job is disabled with `-ReplaceJobPolicy Disable`), the managed server
    is taken out of repository gateway lists (an emptied list switches to automatic selection), then the proxy role
    and the managed server are deleted from VBR.
-3. **Old VM**: powered off and renamed `<host>-old-<stamp>` so the name and IP are free; deleted
-   right away with `-PurgeOldVm`. Delete the renamed VM yourself once the new proxy has proven itself.
+3. **Old VM**: the VM that VMware Tools report with the row's `ip` (or `ip2`), or the VM that carries
+   the row's VM name. Finding it by address means a proxy that gets a new name under a new naming
+   standard is still replaced, not deployed next to its predecessor. It is shut down from the guest
+   (a hard power-off after `-ReplaceShutdownTimeoutSec`, 300 s by default, or right away when VMware
+   Tools do not run) and renamed `<old name>_ToBeDeleted`, with the date appended when that name is
+   already taken; deleted right away with `-PurgeOldVm`. Delete the renamed VM yourself once the new
+   proxy has proven itself. The VM is looked up **before** step 2, and the row stops with nothing
+   changed when several VMs match, or when the address answers a ping but no VM reports it (another
+   device, or a VM without VMware Tools). In the VBR the old proxy is found by the row's registration
+   name, its IP, or the old VM's guest host name or VM name.
 4. **Deploy and register** exactly as for a new node. The fresh appliance pairs with handshake
    `000000`.
 5. **Restore**: the new proxy id is put back into every captured job list, the new managed-server id
@@ -578,8 +591,8 @@ pwsh -File ./Deploy-VeeamProxies.ps1 -CsvPath ./proxies.csv -Vbr vbr01 ... -Repl
 If the run is interrupted after step 2, rerun the row with `-Replace -SkipDeploy` (or `-Replace`
 for a full rebuild): the manifest on disk is picked up and restored after registration.
 
-You may power off and rename the old VM yourself before the run; with `-Replace` the script then
-simply finds nothing to move aside and continues. Do not leave it powered on, since the new VM
+You may power off and rename the old VM yourself before the run; a powered-off VM reports no
+address, so with `-Replace` the script then finds nothing to move aside and continues. Do not leave it powered on, since the new VM
 takes the same IP. Without `-Replace`, a run against a proxy whose VBR object is not *Available*
 stops with a message pointing at `-Replace`, instead of skipping the add and reporting a success
 that the VBR console would contradict. CSV `tasks`

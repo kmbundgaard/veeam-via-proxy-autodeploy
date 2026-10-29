@@ -195,6 +195,12 @@ lines, then run `Deploy-VeeamProxies.ps1`. Section 1 of the usage guide lists th
 2. **Plan the fleet** in `Fleet-Planner.html`: your own host name pattern (`{namespace}-{nn}` by
    default), IP ranges, cluster, datastore, folder, port group, task slots. With the server, "Load
    vSphere inventory" fills the placement fields from vCenter. Export the CSV.
+   When the VM name in vCenter follows a different standard than the host name, set a **VM name
+   pattern** as well, e.g. `{datacenter}_km_{hostname}` next to the hostname pattern
+   `{location}-{cluster}{nn}` gives VM `ros_km_vpr-nodspa0101` with host name `vpr-nodspa0101`.
+   A **search domain** keeps the host name short and makes the VBR register `hostname.domain`. The
+   optional **VM/Host group** (e.g. `vmgr-{cluster}`) puts the VMs into an existing DRS VM group, and
+   the **vSphere tags** under Run commands (`Category = Tag` per line) go on every VM of the run.
 3. **DNS.** Create the A and PTR records with `New-ProxyDnsRecords.ps1` (Microsoft AD DNS), or set
    the `vbrname` column to each proxy's IP so VBR adds it by address.
 4. **Test connections** in the web page, or run the script with `-ValidateOnly -BaseIso` from the
@@ -223,8 +229,9 @@ lines, then run `Deploy-VeeamProxies.ps1`. Section 1 of the usage guide lists th
   clear text only inside each node's ISO, which is deleted after the deploy.
 - **Replacing a proxy** instead of troubleshooting it: tick "Replace existing proxies" (or pass
   `-Replace`) and run the same CSV row again. The toolkit records which jobs pin that proxy,
-  removes it from VBR, powers off and renames the old VM, deploys and registers a fresh appliance
-  under the same name and address, and pins it back into the same jobs. Jobs that were pinned only
+  removes it from VBR, shuts down the old VM (found by its IP, so also when it had another name) and
+  renames it `<name>_ToBeDeleted`, deploys and registers a fresh appliance on the same address, and
+  pins it back into the same jobs. Jobs that were pinned only
   to that proxy run on automatic proxy selection during the 25 minutes, or are disabled if you choose
   that option. Repository proxy affinity is the one setting you re-check by hand afterwards.
 - **Gateway servers** for Dell Data Domain or HPE StoreOnce: set the row's role to `gateway` (or

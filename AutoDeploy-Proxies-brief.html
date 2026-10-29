@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoDeploy Proxies</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column; a flow strip, a capability grid, one comparison table. */
+:root {
+  --bg: #f6f7f7; --surface: #ffffff; --fg: #1b2426; --muted: #56656a; --line: #d9e0e1;
+  --accent: #0d6e63; --accent-soft: #e2f1ee; --warn: #8a5a00;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121819; --surface: #1a2224; --fg: #e4ebec; --muted: #9aaaae; --line: #2c393c;
+  --accent: #4fc2b1; --accent-soft: #173733; --warn: #e3b25a; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121819; --surface: #1a2224; --fg: #e4ebec; --muted: #9aaaae; --line: #2c393c;
+  --accent: #4fc2b1; --accent-soft: #173733; --warn: #e3b25a; color-scheme: dark }
+
+body { background: var(--bg); color: var(--fg); font: 15px/1.6 var(--f-body); }
+.wrap { max-width: 920px; margin: 0 auto; padding-block: 40px 56px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 40px; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; line-height: 1.2; }
+h1 { font-size: 2.3rem; font-weight: 600; letter-spacing: -0.01em; }
+h2 { font-size: 1.35rem; font-weight: 600; }
+h3 { font-size: 1rem; font-weight: 600; }
+p { margin: 0; max-width: 68ch; }
+.eyebrow { font: 500 0.72rem/1 var(--f-mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); }
+.lede { font-size: 1.1rem; color: var(--fg); }
+.muted { color: var(--muted); }
+code, .mono { font-family: var(--f-mono); font-size: 0.88em; }
+section { display: grid; gap: 14px; min-width: 0; }
+header { display: grid; gap: 12px; }
+
+.flow { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.flow div { padding: 14px 16px; border-left: 1px solid var(--line); display: grid; gap: 4px; align-content: start; }
+.flow div:first-child { border-left: 0; }
+.flow b { font: 600 0.95rem var(--f-display); }
+.flow span { font-size: 0.86rem; color: var(--muted); }
+.flow i { font: 500 0.72rem var(--f-mono); font-style: normal; color: var(--accent); }
+
+.caps { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 32px; }
+.caps > div { display: grid; gap: 6px; align-content: start; min-width: 0; }
+.caps ul { margin: 0; padding-left: 1.1em; display: grid; gap: 3px; font-size: 0.93rem; }
+.caps li::marker { color: var(--accent); }
+
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 0.93rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 600 0.78rem var(--f-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.total td { font-weight: 600; border-bottom: 0; }
+td.save { color: var(--accent); font-weight: 600; }
+.headline { display: flex; flex-wrap: wrap; gap: 10px 28px; align-items: baseline; padding: 16px 18px; background: var(--accent-soft); border-radius: 6px; }
+.headline b { font: 600 2rem/1 var(--f-display); color: var(--accent); font-variant-numeric: tabular-nums; }
+.headline span { color: var(--fg); }
+.assume { font-size: 0.86rem; color: var(--muted); display: grid; gap: 4px; }
+.assume ul { margin: 0; padding-left: 1.1em; display: grid; gap: 2px; }
+.needs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.needs li { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 4px 12px; font-size: 0.88rem; }
+footer { font-size: 0.82rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px; }
+
+@media (max-width: 700px) {
+  .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .flow div:nth-child(3) { border-left: 0; }
+  .flow div:nth-child(n+3) { border-top: 1px solid var(--line); }
+  .caps { grid-template-columns: 1fr; }
+  h1 { font-size: 1.9rem; }
+}
+</style>
+<style>*,*::before,*::after{box-sizing:border-box} body{margin:0}</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Veeam Backup &amp; Replication v13 · VMware vSphere</div>
+    <h1>AutoDeploy Proxies</h1>
+    <p class="lede">Deploys, registers and replaces Veeam Infrastructure Appliance (VIA) 13.1 backup proxies in bulk, from one CSV. What takes an admin about 45 minutes of clicking per proxy becomes one unattended run per VBR server.</p>
+    <p class="muted">It uses only documented interfaces: the official appliance ISO with its unattended-install answer file, VMware PowerCLI and the Veeam REST API. It works fully offline (dark sites) and keeps no clear-text secrets on disk.</p>
+  </header>
+
+  <section aria-labelledby="flowH">
+    <h2 id="flowH">How a run works</h2>
+    <div class="flow">
+      <div><i>1 · Plan</i><b>Fleet Planner</b><span>Web page: naming pattern, IP range, cluster, datastore, tags. Exports the CSV and the commands.</span></div>
+      <div><i>2 · Check</i><b>Validate + What-if</b><span>Placement, names, DNS, tags, VM groups, secrets and free IPs, checked before anything is built.</span></div>
+      <div><i>3 · Deploy</i><b>Unattended install</b><span>A per-node ISO, a UEFI / Secure Boot VM, install and first-boot configuration. About 25 minutes.</span></div>
+      <div><i>4 · Register</i><b>Into the VBR</b><span>Certificate trust, proxy role, task slots and transport mode, done over REST. A report per row.</span></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="capH">
+    <h2 id="capH">What it can do</h2>
+    <div class="caps">
+      <div>
+        <h3>Deploy at scale</h3>
+        <ul>
+          <li>Any number of proxies from one CSV, one VBR per run</li>
+          <li>Up to 16 appliances at the same time; several VBRs side by side</li>
+          <li>VM sizing, a data disk, logs on disk 2, a second NIC for a backup network</li>
+          <li>Roles: VMware proxy, gateway server for Data Domain / StoreOnce</li>
+          <li>Also deploys the Veeam Software Appliance (backup server, Enterprise Manager)</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Replace without losing jobs</h3>
+        <ul>
+          <li>Records every job and repository that uses the proxy</li>
+          <li>Finds the old VM by its IP, even after a rename to a new naming standard</li>
+          <li>Shuts the old VM down and renames it <code>&lt;name&gt;_ToBeDeleted</code></li>
+          <li>Deploys the new appliance and puts it back into the same jobs</li>
+          <li>Jobs keep running on automatic proxy selection in the meantime</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Fits the customer's standards</h3>
+        <ul>
+          <li>Separate VM name and host name patterns (e.g. <code>dc_org_site-cluster01</code>)</li>
+          <li>Search domain; DNS A and PTR records created in AD DNS</li>
+          <li>vSphere tags on every VM (team, owner, contact …)</li>
+          <li>DRS VM/Host groups per site</li>
+          <li>Loads the real vSphere inventory, so typos show up in the planner</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Safe by default</h3>
+        <ul>
+          <li>Validate and What-if before every real run</li>
+          <li>Skips rows whose name already exists; refuses IP conflicts</li>
+          <li>Rollback removes only what the run itself created</li>
+          <li>Passwords, MFA seeds and credentials encrypted at rest (AES-256)</li>
+          <li>VBR accounts with MFA (TOTP) supported</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Deployment server</h3>
+        <ul>
+          <li>Ready-made Rocky Linux VM that runs the whole toolkit from a browser</li>
+          <li>Reached through an SSH tunnel, or HTTPS with client certificates</li>
+          <li>Built from a self-installing ISO; on Windows even without xorriso or WSL</li>
+          <li>Everything on board: no internet needed at install or run time</li>
+        </ul>
+      </div>
+      <div>
+        <h3>No vCenter access? Still works</h3>
+        <ul>
+          <li>ISO-only mode: one ISO per node, one ISO with a boot menu, or one that asks at install time</li>
+          <li>A VM build sheet for whoever creates the VMs</li>
+          <li>Registration afterwards, with VBR access only</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="calcH">
+    <h2 id="calcH">Example: 150 proxies on 4 VBR servers</h2>
+    <p>The full lifecycle: deploy all 150, and later replace all 150 (for example a rebuild under a new naming standard). That's about 38 proxies per VBR.</p>
+    <div class="headline"><b>≈ 275 hours</b><span>of admin work saved: about 36 working days down to about 1.5 days.</span></div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Task</th><th class="num">By hand</th><th class="num">With the toolkit</th><th>Elapsed time with the toolkit</th></tr></thead>
+        <tbody>
+          <tr><td>Deploy 150 new proxies</td><td class="num">≈ 112 h</td><td class="num">≈ 6 h</td><td>About one night: 4 VBRs side by side, 4 appliances at a time each</td></tr>
+          <tr><td>Replace 150 proxies, jobs kept</td><td class="num">≈ 175 h</td><td class="num">≈ 4 h</td><td>About a day and a night: one proxy at a time per VBR, all 4 VBRs side by side</td></tr>
+          <tr class="total"><td>Total hands-on work</td><td class="num">≈ 287 h</td><td class="num">≈ 10 h</td><td class="save">about 96 % less</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="assume">
+      <span>Assumptions (estimates, adjust to the customer):</span>
+      <ul>
+        <li>By hand, per proxy: create the VM, run the appliance installer and initial configuration, add it to the VBR, set the proxy role, DNS, tags and group: about 45 minutes.</li>
+        <li>Replacing by hand also means writing down and re-doing the job and repository assignments and handling the old VM: about 70 minutes per proxy.</li>
+        <li>With the toolkit, per VBR: plan in the planner, Validate, What-if, start, check the report. About 1.5 hours for a deploy run and 1 hour for a replace run. The runs themselves are unattended.</li>
+        <li>Appliance run time: about 25–30 minutes to deploy and about 35 minutes to replace. A replace runs one proxy at a time per VBR, so job edits can't overlap.</li>
+        <li>Not counted: fewer typos and failed installs, and a consistent result on every proxy.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section aria-labelledby="needH">
+    <h2 id="needH">What the customer provides</h2>
+    <ul class="needs">
+      <li>VIA 13.1 ISO (Veeam download)</li>
+      <li>vCenter account: create VMs, upload ISOs</li>
+      <li>VBR account: add managed servers and proxies</li>
+      <li>One appliance settings file per VBR (passwords, MFA, NTP)</li>
+      <li>IP range and naming standard</li>
+      <li>Optional: AD DNS rights, vSphere tags and VM groups</li>
+    </ul>
+  </section>
+
+  <footer>Field-built toolkit: a CSV-driven toolkit around the official Veeam appliance ISO, PowerCLI and the Veeam REST API. The time figures are planning estimates, not measurements of a specific environment.</footer>
+</div>
+</body>
+</html>
