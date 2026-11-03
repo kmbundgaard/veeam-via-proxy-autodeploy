@@ -248,7 +248,7 @@
             </details>
             <div class="grid2">
               <label class="f"><span class="l">Task slots per proxy</span><input type="number" id="g_tasks" min="1" max="100" value="12"></label>
-              <label class="f"><span class="l">Role</span><select id="g_role"><option value="viproxy">viproxy (VMware Linux proxy)</option><option value="gateway">gateway (Data Domain / StoreOnce gateway server)</option><option value="viproxy+gateway">viproxy+gateway (both)</option><option value="vbr">vbr (Software Appliance: Backup &amp; Replication server)</option><option value="em">em (Software Appliance: Enterprise Manager)</option></select></label>
+              <label class="f"><span class="l">Role</span><select id="g_role"><option value="viproxy">viproxy (VMware Linux proxy)</option><option value="gateway">gateway (Data Domain / StoreOnce gateway server)</option><option value="viproxy+gateway">viproxy+gateway (both)</option><option value="vbr">vbr (Software Appliance: Backup &amp; Replication server)</option><option value="em">em (Software Appliance: Enterprise Manager)</option><option value="hardenedrepo">hardenedrepo (Hardened Repository, ISO only)</option></select></label>
             </div>
             <label class="f" id="g_gwrepo_f" hidden><span class="l">Gateway for repositories (optional, <code>;</code>-separated)</span><input type="text" id="g_gwrepo" placeholder="DD-Repo01;StoreOnce-Repo01" aria-describedby="g_gwrepo_h"><span class="hint" id="g_gwrepo_h">Existing Dell Data Domain or HPE StoreOnce repositories. Empty = the appliance is only added as a managed server and can be picked as gateway in the repository settings.</span></label>
             <div class="actions">
@@ -407,8 +407,9 @@
           <option value="IsoSingle">ISO only · one ISO for all nodes, pick in the boot menu</option>
           <option value="IsoPrompt">ISO only · generic ISO, asks for name + network at install</option>
         </select></label>
-        <label class="f"><span class="l">Base ISO (server folder iso/)</span><select id="r_iso"></select></label>
+        <label class="f"><span class="l">Base ISO (server folder iso/)</span><select id="r_iso"></select><span class="small muted" id="r_isoInfo"></span></label>
       </div>
+      <label class="f"><span class="l">Upload a new base ISO to the server (VeeamInfrastructureAppliance / VeeamSoftwareAppliance .iso; the page and run views pause until it finishes)</span><input type="file" id="r_isoUpload" accept=".iso"><progress id="r_isoProg" max="1" value="0" hidden style="width:100%"></progress></label>
       <div class="grid3">
         <label class="f"><span class="l">Appliance settings file on the server (veeamadmin password, TOTP seed, NTP; from appliance-secrets.example.conf)</span><select id="r_settings"></select><span class="small muted" id="r_settingsInfo"></span></label>
         <label class="f"><span class="l">Upload a new plaintext appliance settings .conf (the server encrypts it and discards the plaintext)</span><input type="file" id="r_settingsUpload" accept=".conf,.txt"></label>
@@ -462,6 +463,9 @@
   // VeeamSoftwareAppliance ISO (boot entry picks the product), never combined, never registered to a VBR.
   const VSA_ROLES = ['vbr', 'em'];
   const isVsa = (r) => roleParts(r.role).some(x => VSA_ROLES.includes(x));
+  // Hardened repository (VIA role veeam-lhr): ISO build only, its own VBR key (the answer file holds one role per run).
+  const isHr = (r) => roleParts(r.role).includes('hardenedrepo');
+  const groupIsHr = (k) => { const rs = state.rows.filter(r => (r.vbr || '(no vbr)') === k); return rs.length > 0 && rs.every(isHr); };
   const groupIsVsa = (k) => { const rs = state.rows.filter(r => (r.vbr || '(no vbr)') === k); return rs.length > 0 && rs.every(isVsa); };
   const roleParts = (role) => (role || '').toLowerCase().split(/[+;, ]+/).filter(Boolean);
   const MONO = new Set(['vbr','hostname','ip','netmask','gateway','dns','tasks',VM,VG,HS,VN,DS,IP2,NM2]);
@@ -549,8 +553,13 @@
       if (!r.dns) P.warn.push('dns is empty (kickstart --nameserver will be blank)');
       else { const bad = r.dns.split(',').map(s => s.trim()).filter(s => s && !isIPv4(s)); if (bad.length) P.bad.push(`dns has non-IPv4 entries: ${bad.join(', ')}`); }
       const parts = roleParts(r.role), isProxy = parts.includes('viproxy'), isGw = parts.includes('gateway');
-      const unknown = parts.filter(x => !ROLES.includes(x) && !VSA_ROLES.includes(x));
-      if (unknown.length) P.bad.push(`role "${r.role}" is not valid: use viproxy, gateway, viproxy+gateway, vbr or em`);
+      const unknown = parts.filter(x => !ROLES.includes(x) && !VSA_ROLES.includes(x) && x !== 'hardenedrepo');
+      if (unknown.length) P.bad.push(`role "${r.role}" is not valid: use viproxy, gateway, viproxy+gateway, hardenedrepo, vbr or em`);
+      if (isHr(r)) {
+        if (parts.length > 1) P.bad.push('hardenedrepo cannot be combined with another role');
+        if (state.rows.some(o => (o.vbr || '') === (r.vbr || '') && o.role && !isHr(o))) P.bad.push(`VBR key "${r.vbr}" mixes hardened repositories with other rows: one run writes one appliance role - give them their own key`);
+        for (const k of [GR, HS]) if (r[k]) P.warn.push(`${k} is ignored for a hardened repository row`);
+      }
       if (isVsa(r)) {
         if (parts.length > 1) P.bad.push('vbr and em are whole Software Appliances: they cannot be combined with another role');
         const mix = state.rows.some(o => (o.vbr || '') === (r.vbr || '') && o.role && !isVsa(o));
@@ -562,7 +571,7 @@
       if (isGw && !r[GR]) P.warn.push('gateway without gatewayrepo: the appliance is added as a managed server only; pick it as gateway in the Data Domain / StoreOnce repository settings');
       const t = Number(r.tasks);
       if (!isProxy && !r.tasks) { /* gateway-only or Software Appliance: no task slots */ }
-      else if (isVsa(r)) P.warn.push('tasks is ignored for a Software Appliance row');
+      else if (isVsa(r) || isHr(r)) P.warn.push(`tasks is ignored for a ${isHr(r) ? 'hardened repository' : 'Software Appliance'} row`);
       else if (!r.tasks || !Number.isInteger(t) || t < 1 || t > 100) P.bad.push('tasks must be an integer 1–100');
       else if (t > state.sizing.cpu * 2) P.warn.push(`tasks ${t} is more than 2× the ${state.sizing.cpu} vCPU sizing (heavy oversubscription)`);
       if (r[VM]) {
@@ -796,6 +805,20 @@
         out.appendChild(vb);
         continue;
       }
+      if (groupIsHr(k)) {
+        // Hardened repository group: ISO(s) + build sheet only; the servers and the VBR repository are set up by hand.
+        const hiso = /InfrastructureAppliance/i.test(iso) ? iso : '<VeeamInfrastructureAppliance_13.x.iso>';
+        const hsz = (s.cpu !== 6 ? ` -VmCpu ${s.cpu}` : '') + (s.ram !== 12 ? ` -VmMemoryGB ${s.ram}` : '') + (s.disk !== 120 ? ` -VmDiskGB ${s.disk}` : '') + (s.data ? ` -VmDataDiskGB ${s.data}` : '');
+        const hsteps = [['1 · Validate (offline)', `${base}${cont}-ApplianceSecretsFile ${pfx}${sec}${cont}-BaseIso ${pfx}${hiso} -ValidateOnly${hsz}`],
+          [`2 · Build ${$('c_single').checked ? 'one ISO for all nodes' : 'one ISO per node'} + build sheet (output in iso-out/)`, `${base}${cont}-IsoOnly${$('c_single').checked ? ' -SingleIso' : ''} -BaseIso ${pfx}${hiso}${cont}-ApplianceSecretsFile ${pfx}${sec}${hsz}`]];
+        const hb = document.createElement('div'); hb.className = 'cmdblock';
+        const hn = g.get(k).n;
+        hb.innerHTML = `<div class="cmdhead"><span class="t"><span class="mono">${esc(k)}</span> · ${hn} hardened repositor${hn === 1 ? 'y' : 'ies'} (ISO only)</span><span class="grow"></span></div>` +
+          hsteps.map(([t, cmd]) => `<div class="cmdhead"><span class="small muted">${t}</span><span class="grow"></span><button type="button" class="btn quiet small" data-copy>Copy</button></div><pre>${esc(cmd)}</pre>`).join('') +
+          `<p class="hint">Multi-disk layout: disk 1 = system, the other disks become repository storage. The settings file needs <code>VEEAMADMIN_MFA_ENABLED=true</code> or the Security Officer on (Veeam refuses the hardened repository role otherwise). After install, add the server in the VBR console as a hardened repository; the role, transport and replace options apply to proxies only. Works with the 13.1 and 13.0.x Infrastructure Appliance ISO.</p>`;
+        out.appendChild(hb);
+        continue;
+      }
       const a = `${base}${cont}-ApplianceSecretsFile ${pfx}${sec}${cont}-BaseIso ${pfx}${iso} -ValidateOnly${hw}`;
       const common = `${base}${cont}-vCenterServer ${vc}${vcUser ? ' -vCenterUser ' + vcUser : ''} -BaseIso ${pfx}${iso}${cont}-ApplianceSecretsFile ${pfx}${sec}${cont}-VBRServer ${vbr}${v.user ? ' -VBRUser ' + v.user : ''}` +
         ($('c_tls').checked ? ' -SkipTlsVerify' : '') + (v.mfa ? `${cont}-VBRMfaSecretFile ${pfx}${v.mfa}` : '') +
@@ -996,6 +1019,18 @@
     if (!$('r_vcuser').value) $('r_vcuser').value = $('c_vcuser').value;
     syncVbrFields();
     syncIsoForVbr();
+    showIsoInfo();
+  }
+  // SHA-256 and volume label recorded when the ISO was uploaded through the page; compare the hash with KB4738.
+  // A 13.0.x ISO is recognised by the deploy script (kickstart + boot entry per role, VBR api 1.3-rev1) - say so here.
+  function showIsoInfo(msg, bad) {
+    const el = $('r_isoInfo'); el.className = 'small ' + (bad ? 'bad' : 'muted');
+    if (msg) { el.textContent = msg; return; }
+    const name = $('r_iso').value, info = srv.status && srv.status.isoInfo && srv.status.isoInfo[name];
+    const old = /_13\.0\./.test(name) ? ' · 13.0.x layout: kickstart and boot entry are picked per role, a 13.0 VBR is registered with api 1.3-rev1' : '';
+    if (!name) { el.textContent = ''; return; }
+    if (!info) { el.textContent = 'Copied in with scp: no SHA-256 recorded (run sha256sum on the server).' + old; return; }
+    el.textContent = `label ${info.label || '?'} · ${(info.bytes / 1073741824).toFixed(2)} GB · SHA-256 ${info.sha256} (check against KB4738)${old}`;
   }
   function syncIsoForVbr() {
     // Preselect the ISO that fits the chosen VBR key's rows (only when the current pick does not fit).
@@ -1023,6 +1058,7 @@
       if (!vsaRun && isoVsa) { toast(`${vbr} holds proxy / gateway rows: pick the VeeamInfrastructureAppliance ISO, not ${isoName}.`); return; }
     }
     if (vsaRun && ['RegisterOnly', 'IsoSingle', 'IsoPrompt'].includes(mode)) { toast('That mode does not apply to Software Appliance rows (vbr / em).'); return; }
+    if (groupIsHr(vbr) && !['Validate', 'IsoPerNode', 'IsoSingle', 'IsoPrompt'].includes(mode)) { toast('Hardened repository rows are built as ISOs only: pick Validate or an ISO-only mode.'); return; }
     const warn = vsaRun ? {
       Rollback: `ROLLBACK: DELETE ${n} Software Appliance VM(s) of ${vbr} from vCenter. Continue?`,
       Full: `Deploy ${n} Software Appliance VM(s) for ${vbr} (no VBR registration). Continue?`,
@@ -1106,7 +1142,7 @@
     if (!confirm('Delete the ISO output of this run on the server? Copy the ISOs first.')) return;
     try { await api(`/api/runs/${b.dataset.delfiles}/files/delete`, { method: 'POST', body: '{}' }); toast('ISO output deleted.'); watchRun(b.dataset.delfiles); } catch (err) { toast(err.message); }
   });
-  $('r_vbr').addEventListener('change', () => { syncVbrFields(); syncIsoForVbr(); });
+  $('r_vbr').addEventListener('change', () => { syncVbrFields(); syncIsoForVbr(); showIsoInfo(); });
   $('r_run').addEventListener('click', startRun);
   $('r_inv').addEventListener('click', async () => {
     const server = $('r_vc').value.trim(), user = $('r_vcuser').value.trim(), password = $('r_vcpass').value;
@@ -1169,6 +1205,38 @@
     e.target.value = '';
   });
   $('r_settings').addEventListener('change', () => showSettingsInfo());
+  $('r_iso').addEventListener('change', () => showIsoInfo());
+  // Base ISO upload: raw PUT body (XHR for the progress bar), streamed to disk and hashed by the server.
+  // The server answers one request at a time, so polling stalls until the upload ends; runs keep going.
+  let isoUploading = false;
+  window.addEventListener('beforeunload', (e) => { if (isoUploading) { e.preventDefault(); e.returnValue = ''; } });
+  $('r_isoUpload').addEventListener('change', (e) => {
+    const inp = e.target, f = inp.files[0]; if (!f) return;
+    if (!/\.iso$/i.test(f.name)) { toast('Pick an .iso file.'); inp.value = ''; return; }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$/.test(f.name)) { toast('Rename the file: letters, digits, . _ - only.'); inp.value = ''; return; }
+    if ((srv.status.isoFiles || []).includes(f.name)) { toast(`${f.name} is already on the server.`); inp.value = ''; return; }
+    if (!/(Infrastructure|Software)Appliance/i.test(f.name) && !confirm(`${f.name} does not look like a Veeam appliance ISO. Upload anyway?`)) { inp.value = ''; return; }
+    const bar = $('r_isoProg'), gb = (b) => (b / 1073741824).toFixed(2), t0 = Date.now();
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', '/api/iso/' + encodeURIComponent(f.name));
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = (ev) => {
+      if (!ev.lengthComputable) return;
+      bar.value = ev.loaded / ev.total;
+      const mbs = ev.loaded / 1048576 / Math.max(1, (Date.now() - t0) / 1000);
+      showIsoInfo(`uploading ${f.name}: ${gb(ev.loaded)} of ${gb(ev.total)} GB (${mbs.toFixed(1)} MB/s)${ev.loaded === ev.total ? ' - server is finishing…' : ''}`);
+    };
+    const done = async (ok, msg) => {
+      isoUploading = false; inp.disabled = false; inp.value = ''; bar.hidden = true;
+      if (!ok) { toast('ISO upload failed.'); showIsoInfo(msg, true); return; }
+      toast(`${f.name} uploaded.`);
+      try { srv.status = await api('/api/status'); renderServerPanel(); $('r_iso').value = f.name; showIsoInfo(); } catch (err) { showIsoInfo(err.message, true); }
+    };
+    xhr.onload = () => { let b = {}; try { b = JSON.parse(xhr.responseText); } catch (err) {} done(xhr.status === 200, b.error || `HTTP ${xhr.status}${xhr.status === 413 ? ' - the HTTPS proxy limits the body size: re-run enable-https-client-cert.sh from this version' : ''}`); };
+    xhr.onerror = () => done(false, 'upload interrupted (connection lost) - the server discards the partial file');
+    isoUploading = true; inp.disabled = true; bar.value = 0; bar.hidden = false;
+    xhr.send(f);
+  });
 
   // ---------- boot ----------
   try { const th = localStorage.getItem(LS_KEY + ':theme'); if (th) setTheme(th); } catch (e) {}

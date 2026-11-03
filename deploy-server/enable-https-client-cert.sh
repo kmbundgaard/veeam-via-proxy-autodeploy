@@ -64,6 +64,18 @@ server {
         proxy_buffering    off;                       # live run logs
         proxy_read_timeout 600s;
     }
+
+    # Base ISO upload from the page (multi-GB): no size cap, streamed straight through instead of spooled to disk.
+    location /api/iso/ {
+        client_max_body_size    0;
+        proxy_request_buffering off;
+        proxy_pass         http://127.0.0.1:8080;
+        proxy_set_header   Host 127.0.0.1:8080;
+        proxy_set_header   X-Client-Cert-DN \$ssl_client_s_dn;
+        proxy_http_version 1.1;
+        proxy_send_timeout 3600s;
+        proxy_read_timeout 3600s;
+    }
 }
 N
 restorecon -R /etc/nginx

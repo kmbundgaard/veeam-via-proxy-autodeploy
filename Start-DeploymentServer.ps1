@@ -16,11 +16,11 @@
       * The server key lives in <DataDir>/secrets/server.key (created on first start, mode 600).
 
     Layout under -DataDir (default <Root>/server-data):
-      iso/        base ISOs you copy here (shown in the page)
+      iso/        base ISOs: copied here with scp, or uploaded from the page (adds <name>.iso.info.json with the SHA-256)
       secrets/    server.key, *.enc settings files, optional *.mfa TOTP seed files
       runs/<id>/  proxies.csv, run.log, run.err, run.json, staging/, DeployReport_*.csv
 
-    API (JSON):  GET /api/status | POST /api/settings {name,content} | POST /api/run {...} |
+    API (JSON):  GET /api/status | POST /api/settings {name,content} | PUT /api/iso/{name} (raw body) | POST /api/run {...} |
                  GET /api/runs | GET /api/runs/{id} | GET /api/runs/{id}/log | POST /api/runs/{id}/cancel |
                  GET /api/runs/{id}/files/{name} (ISO-only output below 64 MB, e.g. the VM build sheet) |
                  POST /api/runs/{id}/files/delete (removes the run's ISO output: it holds the appliance passwords)
@@ -46,6 +46,7 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:ApiVersionSet = $PSBoundParameters.ContainsKey('ApiVersion')   # else each run lets the deploy script pick (13.0.x / 13.1)
 
 # ---------------------------------------------------------------------------
 $IsoDir = Join-Path $DataDir 'iso'; $SecretsDir = Join-Path $DataDir 'secrets'; $RunsDir = Join-Path $DataDir 'runs'
@@ -156,6 +157,62 @@ function Send-File { param($Ctx, [string]$Path)
     try { $fs.CopyTo($Ctx.Response.OutputStream, 1MB) } finally { $fs.Dispose(); $Ctx.Response.OutputStream.Close() } }
 function Read-Body { param($Ctx) $r = [IO.StreamReader]::new($Ctx.Request.InputStream, $Ctx.Request.ContentEncoding); try { return $r.ReadToEnd() } finally { $r.Dispose() } }
 $SafeName = '^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$'
+
+# --- base ISO upload ------------------------------------------------------------------------------------
+function Save-UploadedIso {
+    # PUT /api/iso/{name} with the raw file as body (the page sends it with XHR, no multipart). Streamed to
+    # iso/<name>.part and hashed on the way - never held in memory - then renamed once the byte count matches.
+    # This listener serves one request at a time: the page and run polling wait until the upload ends, the runs
+    # themselves keep going (separate processes). Writes iso/<name>.info.json (SHA-256, volume label, size).
+    param($Ctx, [string]$Name)
+    if ($Name -notmatch $SafeName -or $Name -notmatch '\.iso$') { Send-Json $Ctx 400 @{ error = 'bad name - an .iso file name of letters, digits, . _ - only' }; return }
+    $dest = Join-Path $IsoDir $Name
+    if (Test-Path -LiteralPath $dest) { Send-Json $Ctx 409 @{ error = "$Name is already on the server - remove it there first or rename the file" }; return }
+    $len = $Ctx.Request.ContentLength64
+    if ($len -lt 1MB) { Send-Json $Ctx 411 @{ error = 'upload needs a Content-Length (an ISO, not an empty or chunked body)' }; return }
+    try { $free = [IO.DriveInfo]::new($IsoDir).AvailableFreeSpace } catch { $free = [long]::MaxValue }
+    # 1 GB headroom: per-node ISO builds stage on the same disk (default DataDir).
+    if ($free -lt ($len + 1GB)) { Send-Json $Ctx 507 @{ error = ("not enough space in {0}: {1:N1} GB free, the ISO needs {2:N1} GB + 1 GB headroom" -f $IsoDir, ($free / 1GB), ($len / 1GB)) }; return }
+    $part = "$dest.part"
+    Write-SrvLog "ISO upload started: $Name ($([math]::Round($len / 1GB, 2)) GB) - other requests wait until it ends"
+    $sha = [System.Security.Cryptography.IncrementalHash]::CreateHash([System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $buf = [byte[]]::new(4MB); $got = [long]0
+    try {
+        $fs = [IO.File]::Create($part)
+        try {
+            $in = $Ctx.Request.InputStream
+            while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) { $fs.Write($buf, 0, $n); $sha.AppendData($buf, 0, $n); $got += $n }
+        }
+        finally { $fs.Dispose() }
+        if ($got -ne $len) { throw "upload ended after $got of $len bytes" }
+        # ISO 9660 primary volume descriptor: 'CD001' at 0x8001, volume label (32 bytes) at 0x8028.
+        $hdr = [byte[]]::new(72); $fs = [IO.File]::OpenRead($part)
+        try { [void]$fs.Seek(0x8000, 'Begin'); [void]$fs.Read($hdr, 0, 72) } finally { $fs.Dispose() }
+        if ([Text.Encoding]::ASCII.GetString($hdr, 1, 5) -ne 'CD001') { throw 'not an ISO 9660 image' }
+        $label = [Text.Encoding]::ASCII.GetString($hdr, 40, 32).Trim([char]0, ' ')
+        $hash = [Convert]::ToHexString($sha.GetHashAndReset()).ToLowerInvariant()
+        Move-Item -LiteralPath $part -Destination $dest
+    }
+    catch {
+        Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+        Write-SrvLog "ISO upload of $Name failed: $($_.Exception.Message)" 'WARN'
+        Send-Json $Ctx 400 @{ error = "upload failed: $($_.Exception.Message)" }; return
+    }
+    finally { $sha.Dispose() }
+    $info = [ordered]@{ sha256 = $hash; label = $label; bytes = $got; uploaded = (Get-Date).ToString('o') }
+    $info | ConvertTo-Json -Compress | Set-Content -Path "$dest.info.json"
+    Write-SrvLog "ISO stored: $Name label=$label sha256=$hash" 'OK'
+    $info.ok = $true; $info.name = $Name
+    Send-Json $Ctx 200 $info
+}
+function Get-IsoInfo {
+    # name -> { sha256, label, bytes } for ISOs uploaded through the page (ISOs copied in with scp have none).
+    $out = [ordered]@{}
+    foreach ($f in @(Get-ChildItem $IsoDir -Filter '*.iso.info.json' -ErrorAction SilentlyContinue)) {
+        try { $out[($f.Name -replace '\.info\.json$', '')] = Get-Content $f.FullName -Raw | ConvertFrom-Json -AsHashtable } catch { }
+    }
+    $out
+}
 function Get-Field {
     # StrictMode-safe access to optional JSON fields: (Get-Field $req 'vcenter.server') -> value or $null
     param($Obj, [string]$Path)
@@ -292,10 +349,15 @@ function New-Run {
         if ($mode -in @('RegisterOnly', 'IsoSingle', 'IsoPrompt')) { throw "Mode $mode does not apply to Software Appliance rows (vbr / em)." }
         $needVbr = $false
     }
+    # Hardened repository rows: ISO build only (the deploy script refuses the other modes too, with the same reason).
+    $hr = [bool]@(Import-Csv $csvPath | Where-Object { ([string]$_.role).Trim().ToLowerInvariant() -eq 'hardenedrepo' }).Count
+    if ($hr -and $mode -notin @('Validate', 'IsoPerNode', 'IsoSingle', 'IsoPrompt')) { throw "Hardened repository rows are built as ISOs only: use Validate or one of the ISO-only modes." }
 
     $q = { param($s) "'" + ([string]$s -replace "'", "''") + "'" }
     $a = [System.Collections.Generic.List[string]]::new()
-    $a.Add("-CsvPath $(& $q $csvPath)"); $a.Add("-Vbr $(& $q (Get-Field $Req 'vbr'))"); $a.Add("-IsoStagingDir $(& $q (Join-Path $dir 'staging'))"); $a.Add("-ApiVersion $(& $q $ApiVersion)")
+    $a.Add("-CsvPath $(& $q $csvPath)"); $a.Add("-Vbr $(& $q (Get-Field $Req 'vbr'))"); $a.Add("-IsoStagingDir $(& $q (Join-Path $dir 'staging'))")
+    # Unset = the deploy script picks 1.3-rev2 and steps down to 1.3-rev1 on a 13.0.x VBR by itself.
+    if ($script:ApiVersionSet) { $a.Add("-ApiVersion $(& $q $ApiVersion)") }
     $a.Add("-SecretsKeyFile $(& $q $SecretsKeyFile)")   # once: unlocks the settings file and the per-run credential files
     if ($XorrisoCommand) { $a.Add("-XorrisoCommand $(& $q $XorrisoCommand)") }
     if ($SkipTlsVerify -or (Get-Field $Req 'skipTls')) { $a.Add('-SkipTlsVerify') }
@@ -342,7 +404,7 @@ function New-Run {
         }
     }
     if (-not $vsa -and (Get-Field $Req 'transportMode') -and (Get-Field $Req 'transportMode') -ne 'Auto') { if (([string](Get-Field $Req 'transportMode')) -notin @('HotAdd', 'Nbd', 'DirectStorageAccess')) { throw 'Bad transport mode.' }; $a.Add("-TransportMode $((Get-Field $Req 'transportMode'))") }
-    if (-not $vsa -and (Get-Field $Req 'applianceRole') -and (Get-Field $Req 'applianceRole') -ne 'InfrastructureServerIscsi') { if (([string](Get-Field $Req 'applianceRole')) -notin @('InfrastructureServer', 'None')) { throw 'Bad appliance role.' }; $a.Add("-ApplianceRole $((Get-Field $Req 'applianceRole'))") }
+    if (-not $vsa -and -not $hr -and (Get-Field $Req 'applianceRole') -and (Get-Field $Req 'applianceRole') -ne 'InfrastructureServerIscsi') { if (([string](Get-Field $Req 'applianceRole')) -notin @('InfrastructureServer', 'None')) { throw 'Bad appliance role.' }; $a.Add("-ApplianceRole $((Get-Field $Req 'applianceRole'))") }
     if ((Get-Field $Req 'rollbackOnFailure') -and $mode -in @('DeployOnly', 'Full')) { $a.Add('-RollbackOnFailure') }
     # Appliances at a time (-Parallel): deploy / register modes only; the deploy script refuses unsafe combinations.
     $par = Get-Field $Req 'parallel'
@@ -402,6 +464,7 @@ function Get-Status {
     [ordered]@{
         ok = $true; version = 1; host = [Environment]::MachineName; user = [Environment]::UserName; listen = "$ListenAddress`:$Port"; root = $Root; dataDir = $DataDir
         isoFiles = @(Get-ChildItem $IsoDir -Filter '*.iso' -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty Name)
+        isoInfo = (Get-IsoInfo)
         settingsFiles = @(Get-ChildItem $SecretsDir -Filter '*.enc' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.cred' -and $_.Name -notlike '*.mfa*' } | Sort-Object Name | Select-Object -ExpandProperty Name)
         mfaFiles = @(Get-ChildItem $SecretsDir -Filter '*.mfa*' -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -ExpandProperty Name)
         settingsInfo = (Get-SettingsInfo)
@@ -529,6 +592,7 @@ function Handle-Request { param($Ctx)
             $chk.summary | ConvertTo-Json -Compress | Set-Content -Path (Join-Path $SecretsDir "$name.info.json")   # non-secret sidecar
             Write-SrvLog "settings file stored encrypted: $name (mfa=$($chk.summary.mfa) so=$($chk.summary.securityOfficer) ntp=$($chk.summary.ntp -join ','))"
             Send-Json $Ctx 200 @{ ok = $true; name = $name; summary = $chk.summary }; return }
+        '^PUT /api/iso/([^/]+)$' { Save-UploadedIso -Ctx $Ctx -Name ([uri]::UnescapeDataString($Matches[1])); return }
         '^POST /api/run$' {
             $req = Read-Body $Ctx | ConvertFrom-Json -AsHashtable
             try { $id = New-Run -Req $req; Send-Json $Ctx 200 @{ id = $id } } catch { Send-Json $Ctx 400 @{ error = $_.Exception.Message } }; return }
@@ -543,6 +607,8 @@ $listener.Prefixes.Add($prefix)
 $listener.Start()
 Write-SrvLog "Deployment server listening on $prefix  (root=$Root, data=$DataDir, key=$SecretsKeyFile)" 'OK'
 if ($ListenAddress -notin @('127.0.0.1', 'localhost', '::1')) { Write-SrvLog "Listening on a non-loopback address WITHOUT TLS or authentication. Put nginx (TLS + auth) in front." 'WARN' }
+# A half-written ISO upload from a previous server process.
+Get-ChildItem $IsoDir -Filter '*.iso.part' -ErrorAction SilentlyContinue | ForEach-Object { Remove-Item $_.FullName -Force; Write-SrvLog "removed incomplete ISO upload $($_.Name)" 'WARN' }
 # Runs left without exit.json by a previous server process (restart / crash while they ran): no process is
 # left to wait for, so scrub their secrets now. They keep the state 'interrupted' (no exit.json is written).
 foreach ($d in @(Get-ChildItem $RunsDir -Directory -ErrorAction SilentlyContinue)) {
