@@ -2,6 +2,31 @@
 
 ## 1.3.2 - unreleased
 
+- **Base ISO upload from the planner.** The deployment server panel takes a new base ISO (`PUT /api/iso/<name>`,
+  streamed to disk, SHA-256 and volume label recorded and shown for the KB4738 check). Refuses non-ISO files,
+  existing names and a too-full disk; an interrupted upload leaves nothing behind. `enable-https-client-cert.sh`
+  lifts nginx's 16 MB body limit for that path only. Lab 2026-11-02: 2.7 GB in 33 s over SSH, 1.7 GB in 13 s
+  over HTTPS with client certificate.
+- **13.0.x Infrastructure Appliance ISOs recognised.** A base ISO with `/vmware-proxy-ks.cfg` (13.0.x layout)
+  gets the kickstart and boot entry of its role (`vmware-proxy-ks.cfg` for the iSCSI role, `proxy-ks.cfg` for
+  the plain one) and an answer file without `applianceRole.*` keys; `-KickstartName` / `-GrubDefaultEntry`
+  still override. 13.0.x has no single-disk layout (its installer stops with "At least 2 disks are required"),
+  so such a run always gets the second disk (`-VmDataDiskGB`, default 120 GB). Without an explicit
+  `-ApiVersion`, a VBR that refuses `1.3-rev2` (13.0.x) is retried once with `1.3-rev1`; the deployment server
+  no longer pins the API version unless started with `-ApiVersion`. On `1.3-rev1`, `/connectionCertificate`
+  demands SSH credentials (which the appliance does not accept), so the fingerprint is read from the
+  appliance's TLS certificate on :443 - the hash the VBR itself pins. Lab 2026-11-02, end to end: VBR 13.0.3.63
+  (Software Appliance, built by the tool) + VIA 13.0.3.63 proxy: install, first-boot answer file, add as managed
+  server and VMware proxy role.
+- **Unlicensed VBR named as such.** A VBR without a licence (a fresh Software Appliance) answers every REST call
+  with "License restrictions apply"; the run now stops with "install a licence on the VBR first" instead of the
+  bare HTTP 400 of whichever lookup came first.
+- **Hardened repository ISOs: CSV role `hardenedrepo`.** ISO build only (`-IsoOnly`, `-ValidateOnly`), with the
+  same per-node network, accounts, MFA and NTP as the proxies. 13.1: answer-file role `veeam-lhr` (read from
+  `veeamhostmanager` 13.1.1.9) and the multi-disk boot entry; 13.0.x: `/hardened-repo-ks.cfg`. Refused unless
+  veeamadmin MFA or the Security Officer is on (Veeam's own rule for the role), when mixed with other rows in one
+  run, and in deploy / register modes. Planner: role option, own command block, run panel guard.
+
 - **VM name separate from the host name.** New optional CSV column `vmname` for the name in vCenter, for
   naming standards such as `ros_km_vpr-nodspa0101` (VM) with `vpr-nodspa0101` (host name). Underscores are
   kept; empty = `hostname`, so existing CSVs behave as before. Every lookup by name (pre-check, `-Rollback`,

@@ -49,6 +49,10 @@
                        gateway server list (automatic selection off). REST path only for 'gatewayrepo'.
                        ExaGrid, Quantum DXi, ETERNUS CS800 and InfiniGuard use no gateway.
       viproxy+gateway  Both on the same appliance ('tasks' applies to the proxy).
+      hardenedrepo     Infrastructure Appliance as Veeam Hardened Repository: ISO only (-IsoOnly / -ValidateOnly),
+                       no VM creation, no VBR registration (add it in the console with its handshake). Its
+                       own run (not mixed with proxy rows); multi-disk layout; needs veeamadmin MFA or the
+                       Security Officer enabled in the settings file. 'tasks' is ignored.
       vbr              Veeam Software Appliance - Veeam Backup & Replication server (Stage A only).
       em               Veeam Software Appliance - Veeam Backup Enterprise Manager (Stage A only).
                        vbr / em need -BaseIso = the Software Appliance ISO, cannot be combined with another
@@ -112,7 +116,8 @@
     Appliance role written to the answer file (13.1 unified VIA ISO; the role is no longer chosen
     from the boot menu). InfrastructureServerIscsi (default) = "Infrastructure Server with
     iSCSI/FC/NVMe-oF" (keeps Direct SAN / backup from storage snapshots open);
-    InfrastructureServer = plain proxy.
+    InfrastructureServer = plain proxy. HardenedRepository comes from CSV role 'hardenedrepo'.
+    With a 13.0.x base ISO the role is picked by the kickstart file instead (see -KickstartName).
 
 .PARAMETER Parallel
     Deploy up to N rows at the same time (1-16, default 1 = one after the other). The run becomes an
@@ -342,7 +347,8 @@ param(
     # Appliance role written to the answer file (13.1: role is chosen by the init wizard / answer
     # file, not the boot menu). Iscsi variant = "Infrastructure Server with iSCSI/FC/NVMe-oF".
     # 'None' omits the applianceRole.* lines (13.0.x ISOs pick the role by kickstart file instead).
-    [ValidateSet('InfrastructureServer', 'InfrastructureServerIscsi', 'None')]
+    # HardenedRepository is set by CSV role 'hardenedrepo' (ISO-only runs); not chosen by hand.
+    [ValidateSet('InfrastructureServer', 'InfrastructureServerIscsi', 'HardenedRepository', 'None')]
     [string]$ApplianceRole = 'InfrastructureServerIscsi',
 
     # Working dir for per-node <hostname>.iso. Prefer a WSL-reachable path.
@@ -466,6 +472,7 @@ $ErrorActionPreference = 'Stop'
 # that were NOT given (Get-RowVmSize).
 $script:BoundParams = @{} + $PSBoundParameters
 $script:ParallelTmp = $null
+$script:RestApiFallback = $null   # '1.3-rev1' once a 13.0.x VBR refused 1.3-rev2 (Connect-VbrRest)
 
 # Host OS (StrictMode-safe: $IsWindows is undefined on Windows PowerShell 5.1).
 $script:IsWindowsHost = if ($PSVersionTable.PSVersion.Major -lt 6) { $true } else { $IsWindows }
@@ -735,7 +742,7 @@ public class TrustAllCertsPolicy {
         }
         $script:Rest = @{
             BaseUrl    = "https://{0}:{1}" -f $VBRServer, $VBRRestPort
-            ApiVersion = $ApiVersion
+            ApiVersion = $(if ($script:RestApiFallback) { $script:RestApiFallback } else { $ApiVersion })
             Username   = $VBRCredential.UserName
             Password   = $VBRCredential.GetNetworkCredential().Password
             MfaSecret  = $mfaSecret
@@ -757,6 +764,13 @@ public class TrustAllCertsPolicy {
     catch {
         $status = $null; try { $status = [int]$_.Exception.Response.StatusCode } catch { }
         if ($status -eq 401) { throw "VBR REST at $($script:Rest.BaseUrl): user name or password rejected (HTTP 401). Check the VBR account (and whether it is MFA-enforced: then supply -VBRMfaSecret*)." }
+        # A 13.0.x VBR accepts at most 1.3-rev1. Without an explicit -ApiVersion, step down once instead of failing,
+        # so one run (or one deployment server) serves 13.0.x and 13.1 VBRs alike.
+        if ($status -eq 400 -and -not $Reauth -and -not $script:BoundParams.ContainsKey('ApiVersion') -and $script:Rest.ApiVersion -eq '1.3-rev2') {
+            Write-Log "VBR REST at $($script:Rest.BaseUrl) refused api 1.3-rev2 (HTTP 400) - a 13.0.x VBR; retrying with 1.3-rev1." 'WARN'
+            $script:RestApiFallback = '1.3-rev1'
+            return (Connect-VbrRest)
+        }
         if ($status -eq 400) { throw "VBR REST at $($script:Rest.BaseUrl): HTTP 400 - usually the x-api-version '$($script:Rest.ApiVersion)' is above what this VBR supports (13.1 = 1.3-rev2, 13.0 = 1.3-rev1)." }
         throw ("Cannot reach the VBR REST API at $tokenUri : $($_.Exception.Message). " +
                "Check that -VBRServer is the Backup & Replication server itself (not Veeam ONE, Enterprise Manager or vCenter), " +
@@ -822,6 +836,12 @@ function Invoke-VbrRest {
         # instead of the bare HTTP status - it is what you need to fix a rejected request.
         $detail = $null
         try { if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $detail = ($_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction Stop).message } } catch { $detail = $_.ErrorDetails.Message }
+        # A fresh VBR (e.g. a new Software Appliance) has no licence and its REST API answers every call with
+        # this (lab 2026-11-02, VSA 13.0.3.63). Say what to do instead of the bare error.
+        if ($detail -match 'License restrictions apply') {
+            throw ("VBR $($script:Rest.BaseUrl) has no valid licence: its REST API refuses '$Method $Path' (HTTP $status : $detail). " +
+                   "Install a licence on the VBR first (web UI / console: License > Install), then re-run.")
+        }
         if ($detail) { throw "$Method $Path -> HTTP $status : $detail" }
         throw
     }
@@ -843,6 +863,28 @@ function Wait-VbrRestSession {
     }
 }
 
+function Get-TlsCertificateSha256 {
+    # SHA-256 (uppercase hex, no separators) of the certificate a host presents on a TLS port - the form
+    # LinuxHostSpec.sshFingerprint takes for a TLS-trusted appliance. Any certificate is accepted here:
+    # this reads the identity to pin, like the VBR's own trust dialog; it does not trust it for anything else.
+    param([Parameter(Mandatory)][string]$TargetHost, [int]$Port = 443, [int]$TimeoutMs = 10000)
+    $tcp = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $iar = $tcp.BeginConnect($TargetHost, $Port, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs)) { throw "no TLS answer from ${TargetHost}:$Port within $([int]($TimeoutMs / 1000)) s." }
+        $tcp.EndConnect($iar)
+        $ssl = [System.Net.Security.SslStream]::new($tcp.GetStream(), $false, { param($s, $c, $ch, $e) $true })
+        try {
+            $ssl.AuthenticateAsClient($TargetHost)
+            $raw = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($ssl.RemoteCertificate).RawData
+        }
+        finally { $ssl.Dispose() }
+    }
+    finally { $tcp.Dispose() }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return (([BitConverter]::ToString($sha.ComputeHash($raw))) -replace '-', '') } finally { $sha.Dispose() }
+}
+
 function Get-VbrRestFingerprint {
     # POST /api/v1/connectionCertificate -> the identity the VBR will pin for this host. The
     # 1.3-rev2 model (live swagger, 2026-09-24) returns 'fingerprint' (SSH hosts) and/or
@@ -855,7 +897,16 @@ function Get-VbrRestFingerprint {
     # the plain request returns the appliance TLS certificate (verified against vhr01).
     $body = @{ serverName = $ServerName; type = 'LinuxHost' }
     if ($CredsId) { $body.credentialsId = $CredsId }
-    $out = Invoke-VbrRest -Method POST -Path '/api/v1/connectionCertificate' -Body $body
+    try { $out = Invoke-VbrRest -Method POST -Path '/api/v1/connectionCertificate' -Body $body }
+    catch {
+        # 13.0.x (api 1.3-rev1) wants credentialsStorageType here, and with it SSH credentials that it then tries
+        # over SSH, which the appliance does not offer (lab 2026-11-02, VBR 13.0.3.63: 400, then a hang). Its
+        # managedServers call pins the SHA-256 of the appliance's TLS certificate on :443 (the 400 for a wrong
+        # fingerprint names exactly that hash), so read that certificate directly.
+        if ($_.Exception.Message -notmatch 'CredentialsStorageType must be set') { throw }
+        Write-Log "VBR $($script:Rest.BaseUrl) (13.0.x) cannot fetch the certificate of $ServerName without SSH credentials - reading it from ${ServerName}:443." 'INFO'
+        return (Get-TlsCertificateSha256 -TargetHost $ServerName -Port 443)
+    }
 
     $has = { param($o, $n) ($null -ne $o) -and ($o.PSObject.Properties.Name -contains $n) -and $o.$n }
     # LinuxHostSpec.sshFingerprint for a TLS-trusted appliance must be the SHA-256 hash of the
@@ -1213,12 +1264,13 @@ function Get-RowRoles {
     param($Row)
     $parts = @(([string]$Row.role).ToLowerInvariant() -split '[+;, ]+' | Where-Object { $_ })
     [pscustomobject]@{
-        Proxy   = $parts -contains 'viproxy'
-        Gateway = $parts -contains 'gateway'
-        Vbr     = $parts -contains 'vbr'
-        Em      = $parts -contains 'em'
-        Count   = $parts.Count
-        Unknown = @($parts | Where-Object { $_ -notin @('viproxy', 'gateway', 'vbr', 'em') })
+        Proxy    = $parts -contains 'viproxy'
+        Gateway  = $parts -contains 'gateway'
+        Vbr      = $parts -contains 'vbr'
+        Em       = $parts -contains 'em'
+        Hardened = $parts -contains 'hardenedrepo'
+        Count    = $parts.Count
+        Unknown  = @($parts | Where-Object { $_ -notin @('viproxy', 'gateway', 'vbr', 'em', 'hardenedrepo') })
     }
 }
 
@@ -1227,6 +1279,7 @@ function Get-RoleLabel {
     $p = Get-RowVsaProduct -Row $Row
     if ($p) { return $p.Label }
     $r = Get-RowRoles -Row $Row
+    if ($r.Hardened) { return 'VIA hardened repository' }
     if ($r.Proxy -and $r.Gateway) { return 'VIA proxy+gateway' }
     if ($r.Gateway) { return 'VIA gateway' }
     return 'VIA proxy'
@@ -1692,10 +1745,13 @@ function Import-DeploymentCsv {
         [ipaddress]$null = $r.ip   # throws if not a valid IP
         $roles = Get-RowRoles -Row $r
         if ($roles.Unknown.Count) {
-            throw "Row '$($r.hostname)': role '$($r.role)' is not valid. Use viproxy, gateway or viproxy+gateway (Infrastructure Appliance), or vbr / em (Software Appliance: Backup & Replication / Enterprise Manager)."
+            throw "Row '$($r.hostname)': role '$($r.role)' is not valid. Use viproxy, gateway or viproxy+gateway (Infrastructure Appliance), hardenedrepo (Infrastructure Appliance as Hardened Repository, ISO only), or vbr / em (Software Appliance: Backup & Replication / Enterprise Manager)."
         }
         if (($roles.Vbr -or $roles.Em) -and $roles.Count -ne 1) {
             throw "Row '$($r.hostname)': role '$($r.role)' - vbr and em are whole appliances (Veeam Software Appliance) and cannot be combined with another role."
+        }
+        if ($roles.Hardened -and $roles.Count -ne 1) {
+            throw "Row '$($r.hostname)': role '$($r.role)' - a hardened repository cannot also be a proxy or gateway (Veeam keeps the hardened repository role on its own)."
         }
         if (@(Get-GatewayRepoNames -Row $r).Count -and -not $roles.Gateway) {
             throw "Row '$($r.hostname)': 'gatewayrepo' is set but the role '$($r.role)' has no gateway. Use role gateway or viproxy+gateway."
@@ -1746,6 +1802,12 @@ function Import-DeploymentCsv {
     if ($vsaRows.Count -and $vsaRows.Count -ne @($rows).Count) {
         throw ("The selected rows mix Software Appliance roles (vbr / em: {0}) with Infrastructure Appliance roles - they are built from different ISOs. " +
                "Put them in separate CSVs or give them different 'vbr' values and run each with -Vbr.") -f (($vsaRows.hostname) -join ', ')
+    }
+    # The appliance role sits in the answer file, which one run shares across all its rows.
+    $hrRows = @($rows | Where-Object { (Get-RowRoles -Row $_).Hardened })
+    if ($hrRows.Count -and $hrRows.Count -ne @($rows).Count) {
+        throw ("The selected rows mix hardened repositories ({0}) with proxy / gateway rows - one run writes one appliance role into every ISO. " +
+               "Give the hardened repositories their own 'vbr' value and run them with -Vbr.") -f (($hrRows.hostname) -join ', ')
     }
 
     Write-Log "Loaded $($rows.Count) row(s) for vbr '$VbrFilter'." 'OK'
@@ -2124,6 +2186,8 @@ function Initialize-IsoWorkspace {
     # 13.1: the VIA role is declared in the answer file (unified ISO, unified boot menu).
     $roleLines = switch ($Role) {
         'InfrastructureServerIscsi' { "applianceRole.role=vbproxy`napplianceRole.iSCSI=true" }
+        # Value read from veeamhostmanager 13.1.1.9 (it knows exactly 'vbproxy' and 'veeam-lhr'); not on the public page.
+        'HardenedRepository'        { 'applianceRole.role=veeam-lhr' }
         'None'                      { '' }   # 13.0.x: role comes from the kickstart file, no keys emitted
         default                     { 'applianceRole.role=vbproxy' }
     }
@@ -2211,6 +2275,15 @@ function Build-KickstartPost {
     }
     [void]$b.Append('# <<< veeam-autodeploy <<<' + $nl)
     return ($b.ToString() -replace "`r`n", "`n")
+}
+
+function Get-ViaIsoLayout {
+    # '13.0' when the Infrastructure Appliance ISO has the per-role kickstarts of 13.0.x (/vmware-proxy-ks.cfg),
+    # else '13.1' (one unified /proxy-ks.cfg). Read-only listing of the ISO root.
+    param([Parameter(Mandatory)][string]$Iso)
+    $list = @(Invoke-Xorriso -Arguments @('-indev', (Convert-ToolPath $Iso), '-find', '/', '-maxdepth', '1') 2>$null)
+    if ($list -match 'vmware-proxy-ks\.cfg') { return '13.0' }
+    return '13.1'
 }
 
 function Get-GrubInstallEntry {
@@ -3322,7 +3395,11 @@ function Invoke-ParallelRun {
         else { $base.Add("-$k"); $base.Add([string]$v) }
     }
     # Values the run itself settled (defaults the operator did not pass, the VSA settings) go explicitly.
-    foreach ($k in @('ApplianceRole', 'IsoLabel')) { if (-not $script:BoundParams.ContainsKey($k)) { $base.Add("-$k"); $base.Add([string](Get-Variable -Name $k -ValueOnly)) } }
+    # KickstartName / GrubDefaultEntry: picked for a 13.0.x base ISO, so a worker does not pick again from the settled role.
+    foreach ($k in @('ApplianceRole', 'IsoLabel', 'KickstartName', 'GrubDefaultEntry')) {
+        $v = [string](Get-Variable -Name $k -ValueOnly)
+        if (-not $script:BoundParams.ContainsKey($k) -and $v) { $base.Add("-$k"); $base.Add($v) }
+    }
     $base.AddRange($credArgs)
     # Workers run non-interactively: never let one stop at a confirmation prompt (the script is ConfirmImpact High).
     $base.Add('-Confirm:$false'); $base.Add('-ParallelWorker')
@@ -3406,6 +3483,51 @@ try {
         $SkipRegister = $true
         Write-Log ("Software Appliance run: {0}. Built from the VeeamSoftwareAppliance ISO (label {1}); the boot entry picks the product; no VBR registration." -f
                    (($rows | ForEach-Object { "$($_.hostname) = $(Get-RoleLabel -Row $_)" }) -join ', '), $IsoLabel) 'INFO'
+    }
+
+    # --- Hardened repository run (CSV role hardenedrepo): ISO build only, multi-disk, MFA or SO required ---
+    $script:HardenedRun = [bool]($rows.Count -and (Get-RowRoles -Row $rows[0]).Hardened)
+    if ($script:HardenedRun) {
+        if (-not ($IsoOnly -or $ValidateOnly)) { throw "CSV role hardenedrepo builds ISOs only: run it with -IsoOnly (or -ValidateOnly). Creating the VMs / servers and adding the repository to the VBR stay manual." }
+        if ($script:BoundParams.ContainsKey('ApplianceRole') -and $ApplianceRole -ne 'HardenedRepository') { throw "-ApplianceRole $ApplianceRole does not fit CSV role hardenedrepo - leave -ApplianceRole unset." }
+        $ApplianceRole = 'HardenedRepository'
+        $MultiDisk = $true    # system disk + repository disk(s): the "Standard (Multi-Disk) Deployment" entry
+        # veeamhostmanager refuses the role otherwise: "A Veeam Hardened Repository requires either a configured
+        # Security Officer or veeamadmin with MFA enabled." Fail here, not at first boot on the server.
+        if ($ApplianceSecretsFile) {
+            $hs = Get-ApplianceSecrets -Path $ApplianceSecretsFile
+            if ([string]$hs['VEEAMADMIN_MFA_ENABLED'] -ne 'true' -and [string]$hs['VEEAMSO_ENABLED'] -ne 'true') {
+                throw "A Veeam Hardened Repository needs veeamadmin MFA (VEEAMADMIN_MFA_ENABLED = true) or the Security Officer (VEEAMSO_ENABLED = true) in the settings file."
+            }
+        }
+        Write-Log ("Hardened repository run: {0}. ISO build only, multi-disk layout; add the repository in the VBR console afterwards." -f (($rows.hostname) -join ', ')) 'INFO'
+    }
+
+    # --- Base ISO layout: 13.1 (one /proxy-ks.cfg, role in the answer file) or 13.0.x (one kickstart per role) ---
+    # A 13.0.x ISO is recognised by /vmware-proxy-ks.cfg in its root. Kickstart and boot entry then follow the
+    # role (unless -KickstartName / -GrubDefaultEntry were given) and the answer file carries no applianceRole.*
+    # keys. Layouts read from VeeamInfrastructureAppliance_13.0.2.29 and 13.1.1.18 (lab, 2026-11-02).
+    $script:IsoLayout = '13.1'
+    if ($BaseIso -and -not $script:VsaRun) {
+        try { $script:IsoLayout = Get-ViaIsoLayout -Iso $BaseIso }
+        catch { Write-Log "Could not list the base ISO root ($($_.Exception.Message)) - assuming the 13.1 layout." 'WARN' }
+        if ($script:IsoLayout -eq '13.0') {
+            $fresh = 'Install - fresh install, wipes everything (including local backups)'
+            $pick = if ($script:HardenedRun) { @('hardened-repo-ks.cfg', 'Veeam Hardened Repository') }
+                    elseif ($ApplianceRole -eq 'InfrastructureServer') { @('proxy-ks.cfg', 'Veeam Infrastructure Appliance') }
+                    else { @('vmware-proxy-ks.cfg', 'Veeam Infrastructure Appliance (with iSCSI & NVMe/TCP)') }
+            if (-not $script:BoundParams.ContainsKey('KickstartName'))    { $KickstartName = $pick[0] }
+            if (-not $script:BoundParams.ContainsKey('GrubDefaultEntry')) { $GrubDefaultEntry = "$($pick[1])>$fresh" }
+            Write-Log "Base ISO has the 13.0.x layout: kickstart /$KickstartName, boot entry '$GrubDefaultEntry' (role $ApplianceRole by kickstart, no applianceRole.* keys)." 'INFO'
+            $ApplianceRole = 'None'
+            # 13.0.x has no single-disk layout: its installer stops with "At least 2 disks are required: System at
+            # least 120 GB, Data at least 120 GB" (lab 2026-11-02, VIA 13.0.3.63 with one 120 GB disk).
+            if (-not $MultiDisk) {
+                $MultiDisk = $true
+                Write-Log "13.0.x needs two disks (system + data, 120 GB each at least): adding a $VmDataDiskGB GB thin data disk (-VmDataDiskGB)." 'INFO'
+            }
+            if ($VmDiskGB -lt 120 -or $VmDataDiskGB -lt 120) { throw "13.0.x needs a system disk and a data disk of at least 120 GB each (given $VmDiskGB + $VmDataDiskGB GB)." }
+        }
     }
 
     # --- Parallel (-Parallel N): hand the rows to worker processes, then report ---
