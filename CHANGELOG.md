@@ -2,6 +2,13 @@
 
 ## 1.3.2 - unreleased
 
+- **`Get-DeployServerMedia.ps1`: one download for a dark site.** On any machine with internet (Windows
+  PowerShell 5.1 or pwsh 7) it fetches the Rocky minimal ISO, the seven RPMs, PowerCLI and the PowerShell 7 MSI
+  for the build host into one folder (`iso\`, `rpms\`, `PowerCLI\`, `tools\`, empty `veeam-iso\` and `keys\`),
+  with `SHA256SUMS.txt` and a `NEXT-STEPS.txt` holding the build commands. ISO and RPMs always come from the
+  same Rocky minor (default 9.8, the tested set, pinned by file name); every file is checked against Rocky's
+  CHECKSUM file, the repository metadata or GitHub's release digest. Background: a server installed from one
+  Rocky minor with RPMs of another ends with no pwsh, and the service fails with `203/EXEC`.
 - **Base ISO upload from the planner.** The deployment server panel takes a new base ISO (`PUT /api/iso/<name>`,
   streamed to disk, SHA-256 and volume label recorded and shown for the KB4738 check). Refuses non-ISO files,
   existing names and a too-full disk; an interrupted upload leaves nothing behind. `enable-https-client-cert.sh`

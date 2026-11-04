@@ -28,6 +28,17 @@ from the same server.
 | vCenter account | Your vCenter | Create VMs, upload ISOs, edit VM settings. |
 | VBR account | Your VBR | Add managed servers and proxies via REST; an MFA seed can be supplied. |
 
+**One download for a site without internet.** On any machine with internet, `Get-DeployServerMedia.ps1`
+downloads the Rocky 9.8 minimal ISO, the seven RPMs, PowerCLI and the PowerShell 7 MSI, verifies each against
+its publisher's checksum, and lays them out in one folder to carry to the site (`NEXT-STEPS.txt` inside has the
+build commands). Only the Veeam ISOs still come from veeam.com. Works in Windows PowerShell 5.1:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Get-DeployServerMedia.ps1 -Destination D:\autodeploy-media
+```
+
+Install the server from the Rocky ISO in that folder: the RPMs match its minor version only.
+
 **Downloads and licensing.** The links point to the vendors' official pages; nothing is mirrored
 in this toolkit. Rocky Linux, PowerShell, xorriso and its libraries are open source and may sit
 inside the server ISO. PowerCLI is Broadcom software and the appliance ISO is Veeam software:
