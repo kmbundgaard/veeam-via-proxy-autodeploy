@@ -79,7 +79,13 @@ function Get-Url {
     }
     Move-Item -LiteralPath $part -Destination $OutFile -Force
 }
-function Get-Text { param([string]$Url) (Invoke-WebRequest -UseBasicParsing -Uri $Url).Content }
+function Get-Text {
+    # Windows PowerShell 5.1 returns .Content as byte[] for a non-text content type (Rocky's CHECKSUM file)
+    param([string]$Url)
+    $c = (Invoke-WebRequest -UseBasicParsing -Uri $Url).Content
+    if ($c -is [byte[]]) { return [Text.Encoding]::UTF8.GetString($c) }
+    return [string]$c
+}
 function Get-Sha256 { param([string]$Path) (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Save-Verified {
     # Keep an existing file with the right hash; else download and check. A wrong hash is fatal.
