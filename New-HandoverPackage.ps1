@@ -43,6 +43,7 @@ $ship = @(
     'Start-DeploymentServer.ps1'
     'deployment-server.service.example'
     'Build-DeployServerIso.ps1'
+    'Get-DeployServerMedia.ps1'
     'New-DeployServerVm.ps1'
     'New-HandoverPackage.ps1'
     'Fleet-Planner.html'
@@ -95,7 +96,7 @@ try {
     Write-Host ("Package : {0} ({1} KB, {2} files + VERSION.txt)" -f $zip, [math]::Round((Get-Item -LiteralPath $zip).Length / 1KB), $files.Count)
     Write-Host ("SHA-256 : {0}  (also in {1}.sha256)" -f $hash, (Split-Path $zip -Leaf))
     Write-Host ("Internal docs (CLAUDE.md, .github/): {0}" -f $(if ($IncludeInternalDocs) { 'included' } else { 'left out (-IncludeInternalDocs to add)' }))
-    Write-Host "The customer adds: the VIA 13.1 ISO, PowerShell 7, PowerCLI (Save-Module VCF.PowerCLI), xorriso, Rocky 9 minimal ISO + RPMs (incl. rsync) for the server; optional: the Software Appliance ISO for vbr / em rows - see START-HERE.md."
+    Write-Host "The customer adds: the VIA 13.1 ISO, PowerShell 7, PowerCLI (Save-Module VCF.PowerCLI), xorriso, Rocky 9 minimal ISO + RPMs (incl. rsync) for the server (Get-DeployServerMedia.ps1 downloads all but the Veeam ISO); optional: the Software Appliance ISO for vbr / em rows - see START-HERE.md."
 }
 finally {
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
