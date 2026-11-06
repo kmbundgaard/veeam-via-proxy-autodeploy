@@ -1553,6 +1553,23 @@ function Get-ReplaceManifest {
         oldHostId = $hostId; oldProxyId = $proxyId; proxySettings = $settings; policy = $ReplaceJobPolicy
         jobs = $refs; gateways = $gws; disabledByUs = @()
     }
+    # A manifest from an earlier run that stopped half-way through the release (e.g. a job PUT refused by the
+    # VBR, customer 2026-11-06) holds job lists that were ALREADY unpinned and so are no longer found above.
+    # Keep them (their original proxy list and auto-select flag), or the new proxy would never be pinned back.
+    $mp = Get-ReplaceManifestPath -Row $Row
+    if (Test-Path -LiteralPath $mp) {
+        $prev = Get-Content -LiteralPath $mp -Raw | ConvertFrom-Json
+        # The proxy id the earlier run captured may be gone by now (removed, or the replacement re-registered
+        # under the same name): drop it from the kept lists so no PUT names a proxy that no longer exists.
+        $prevOld = if ($prev.PSObject.Properties['oldProxyId']) { [string]$prev.oldProxyId } else { '' }
+        $keep = @(Get-ManifestList -Manifest $prev -Key 'jobs' | ForEach-Object {
+                $_.proxyIds = @(@($_.proxyIds) | Where-Object { $_ -and $_ -ne $prevOld }); $_ })
+        $prevKeys = @($keep | ForEach-Object { "$($_.jobId)|$($_.path)" })
+        $m.jobs = @($keep + @($refs | Where-Object { $prevKeys -notcontains "$($_.jobId)|$($_.path)" }))
+        $m.disabledByUs = @(Get-ManifestList -Manifest $prev -Key 'disabledByUs')
+        if ($prev.PSObject.Properties['proxySettings'] -and $prev.proxySettings) { $m.proxySettings = $prev.proxySettings }
+        Write-Log "Replace: a manifest from an earlier, interrupted run of '$($Row.hostname)' exists - its $($keep.Count) job list(s) are kept, $(@($m.jobs).Count - $keep.Count) more found now." 'WARN'
+    }
     Save-ReplaceManifest -Manifest $m
     Write-Log ("Replace: captured '{0}' - managed server {1}, proxy {2}, pinned in {3} job list(s){4}" -f $regName, $hostId, $(if ($proxyId) { $proxyId } else { 'none' }), $refs.Count,
                $(if ($refs.Count) { ': ' + (($refs | ForEach-Object { "$($_.jobName) [$($_.path)]" }) -join ', ') } else { '' })) 'INFO'
@@ -1573,10 +1590,13 @@ function Invoke-ReplaceRelease {
     $disabled = [System.Collections.Generic.List[string]]::new()
     foreach ($ref in @($Manifest.jobs)) {
         if (-not $PSCmdlet.ShouldProcess($ref.jobName, "unpin the old proxy from the job ($($ref.path))")) { continue }
-        if ($Manifest.policy -eq 'Disable' -and -not $ref.wasDisabled -and ($disabled -notcontains $ref.jobId)) {
+        if ($Manifest.policy -eq 'Disable' -and -not $ref.wasDisabled -and ($disabled -notcontains $ref.jobId) -and (@(Get-ManifestList -Manifest $Manifest -Key 'disabledByUs') -notcontains [string]$ref.jobId)) {
             try {
                 Invoke-VbrRest -Method POST -Path ("/api/v1/jobs/{0}/disable" -f [uri]::EscapeDataString($ref.jobId)) | Out-Null
                 $disabled.Add([string]$ref.jobId)
+                # Record it at once: if a later step fails, the rerun must still know to re-enable this job.
+                $Manifest.disabledByUs = @(@(Get-ManifestList -Manifest $Manifest -Key 'disabledByUs') + [string]$ref.jobId | Select-Object -Unique)
+                Save-ReplaceManifest -Manifest $Manifest
                 Write-Log "Replace: job '$($ref.jobName)' disabled while its proxy is rebuilt." 'WARN'
             }
             catch {
@@ -1590,7 +1610,7 @@ function Invoke-ReplaceRelease {
         Set-VbrRestJobProxyList -JobId $ref.jobId -Path $ref.path -ProxyIds $remaining -AutoSelect $auto
         Write-Log ("Replace: job '{0}' [{1}] -> {2}" -f $ref.jobName, $ref.path, $(if ($remaining.Count) { "still pinned to $($remaining.Count) other proxy id(s)" } else { 'automatic proxy selection until the new proxy is back' })) 'INFO'
     }
-    $Manifest.disabledByUs = @($disabled)
+    $Manifest.disabledByUs = @(@(Get-ManifestList -Manifest $Manifest -Key 'disabledByUs') + @($disabled) | Where-Object { $_ } | Select-Object -Unique)
     Save-ReplaceManifest -Manifest $Manifest
     $gws = @(Get-ManifestList -Manifest $Manifest -Key 'gateways')
     if ($gws.Count) { $null = Remove-VbrRestGatewayReferences -HostId $Manifest.oldHostId -References $gws }

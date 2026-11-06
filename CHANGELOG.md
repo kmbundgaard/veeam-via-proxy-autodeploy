@@ -2,6 +2,11 @@
 
 ## 1.3.2 - unreleased
 
+- **`-Replace` safe to rerun after a half-done release.** If a job update failed part-way through releasing the old
+  proxy, the rerun captured only the jobs still pinned to it and lost those already unpinned, so the new proxy
+  was never pinned back there. The rerun now keeps the earlier manifest's job lists (minus the old proxy id) and
+  adds what it finds. With `-ReplaceJobPolicy Disable`, each disabled job is written to the manifest at once,
+  so a failure later no longer leaves a job disabled that the restore does not know about.
 - **Job update refused by the VBR: "'Credentials Per Machine' must not be empty".** The VBR returns a job whose
   guest-processing credentials carry an empty per-machine list and then refuses that same model on PUT, so
   re-pinning a job's proxy list (`-Replace`) failed. When every such list in the job is empty, the update is
