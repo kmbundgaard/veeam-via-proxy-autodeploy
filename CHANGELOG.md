@@ -2,6 +2,8 @@
 
 ## 1.3.2 - unreleased
 
+- **VM name pattern without tokens is a prefix.** A pattern such as `ros_km_` gave every VM exactly that name;
+  it now means `ros_km_{hostname}`. Customer, 2026-11-06.
 - **DNS search domain on 13.0.x appliances.** The 13.0.x VIA installs from Rocky 9.2, whose installer does not
   know `--ipv4-dns-search` and stopped with "unrecognized arguments: --ipv4-dns-search=..." before touching the
   disks. For a 13.0.x base ISO the search domain (CSV `dnssearch`) now goes into the installed NIC 1 profile from
