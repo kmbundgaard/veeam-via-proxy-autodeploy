@@ -220,7 +220,7 @@
               <label class="f"><span class="l">Search domain (optional)</span><input type="text" id="g_domain" class="mono" value="" placeholder="corp.example"></label>
             </div>
             <div class="grid2">
-              <label class="f"><span class="l">VM name pattern (optional; empty = the hostname)</span><input type="text" id="g_vmpattern" class="mono" value="" placeholder="{datacenter}_km_{hostname}"></label>
+              <label class="f"><span class="l">VM name pattern (optional; empty = the hostname; text without {tokens} is a prefix: <code>ros_km_</code> = <code>ros_km_{hostname}</code>)</span><input type="text" id="g_vmpattern" class="mono" value="" placeholder="{datacenter}_km_{hostname}"></label>
               <label class="f"><span class="l">VM/Host group (optional)</span><input type="text" id="g_vmgroup" class="mono" value="" placeholder="vmgr-{cluster}" list="dl_vmgroup"></label>
             </div>
             <p class="hint"><code>{namespace}</code> = the free-text prefix on the left, so the customer's own naming standard applies (in the hostname lower-cased; spaces and other characters not allowed in a host name become <code>-</code>). <code>{nn}</code> = two-digit index, <code>{nnn}</code> = three-digit, <code>{n}</code> = plain index. Optional: <code>{cluster}</code> (the VMware cluster below), <code>{vbr}</code> (the VBR key), <code>{datacenter}</code> and <code>{location}</code>. With a <b>search domain</b> the hostname stays a short name: the domain goes to <code>dnssearch</code> and the VBR registers <code>hostname.domain</code> (<code>vbrname</code>). Without one, add the domain to the pattern for FQDNs, e.g. <code>{namespace}-{nn}.corp.example</code>. The <b>VM name pattern</b> sets the name in vCenter (column <code>vmname</code>; underscores kept), e.g. <code>{datacenter}_km_{hostname}</code> gives <code>ros_km_vpr-nodspa0101</code> for the hostname pattern <code>{location}-{cluster}{nn}</code>. Literal text such as <code>km</code> is kept as typed. The <b>VM/Host group</b> is an existing DRS VM group of the cluster (column <code>vmgroup</code>); <code>{cluster}</code> is the cluster name, e.g. <code>vmgr-{cluster}</code>. Keep the part before the first dot within 15 characters (NetBIOS); the table warns when it is longer. The start index continues an existing series that matches the pattern.</p>
@@ -864,7 +864,10 @@
     return out.replace(/\{nnn\}/g, String(n).padStart(3, '0')).replace(/\{nn\}/g, String(n).padStart(2, '0')).replace(/\{n\}/g, String(n));
   }
   // VM name pattern: the hostname tokens (raw) plus {hostname} = the generated (short) hostname.
-  const expandVmPattern = (pattern, n, v, hostname) => expandPattern(pattern.replace(/\{hostname\}/g, '\u0000H\u0000'), n, v, vmToken).replace(/\u0000H\u0000/g, hostname);
+  // A pattern without any {token} (e.g. 'ros_km_') would give every VM the same name (customer, 2026-11-06):
+  // it is a prefix, so the hostname is appended.
+  const vmPatternOf = p => /\{[a-z]+\}/i.test(p) ? p : p + '{hostname}';
+  const expandVmPattern = (pattern, n, v, hostname) => expandPattern(vmPatternOf(pattern).replace(/\{hostname\}/g, '\u0000H\u0000'), n, v, vmToken).replace(/\u0000H\u0000/g, hostname);
   const genVals = (over) => Object.assign({ namespace: $('g_namespace').value, vbr: $('g_vbr').value.trim(), cluster: $('g_cluster').value, datacenter: $('g_dc').value, location: $('g_loc').value }, over || {});
   // Next free index for this pattern among the rows already in the table, so a second batch for the
   // same cluster continues at 03 instead of restarting at 01. Null when no row matches the pattern.
