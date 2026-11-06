@@ -377,6 +377,7 @@
         <label><input type="checkbox" id="c_replace"> <span>Replace existing proxies: capture job pinning, remove from VBR, redeploy, re-pin (the old VM, found by its IP or name, is shut down and renamed <code>&lt;name&gt;_ToBeDeleted</code>)</span></label>
         <label>While replacing, jobs pinned only to that proxy are <select id="c_replacePolicy"><option value="Auto">switched to automatic selection</option><option value="Disable">disabled until it is back</option></select></label>
         <label title="Deploy this many appliances at the same time (-Parallel). Each one runs as its own worker: own ISO build, upload, VM and registration; starts are 45 s apart. 1 = one after the other.">Appliances at a time <input type="number" id="c_par" min="1" max="16" value="1" style="width:4.5em"></label>
+        <label title="VM compatibility of the new VMs. Auto = the newest version the host supports (ESXi 8.0 U2+ = vmx-21), so a cluster whose default compatibility is older (e.g. ESXi 6.0 = vmx-11, which refuses the RHEL 9 guest OS) does not matter.">VM hardware <select id="c_hwver"><option value="">Auto (newest on the host)</option><option>vmx-21</option><option>vmx-20</option><option>vmx-19</option></select></label>
         <label>Transport <select id="c_tm"><option>Auto</option><option>HotAdd</option><option>Nbd</option><option>DirectStorageAccess</option></select></label>
         <label>Appliance role <select id="c_role"><option value="InfrastructureServerIscsi">Infrastructure Server with iSCSI/FC/NVMe-oF</option><option value="InfrastructureServer">Infrastructure Server</option></select></label>
         <label>Shell <select id="c_shell"><option value="bash">Linux deploy host (bash)</option><option value="pwsh">Windows (PowerShell)</option></select></label>
@@ -488,7 +489,7 @@
   // ---------- persistence (per-viewer convenience only) ----------
   function save() {
     try {
-      const cmd = { csv: $('c_csv').value, iso: $('c_iso').value, vc: $('c_vc').value, vcuser: $('c_vcuser').value, dns: $('c_dns').value, tls: $('c_tls').checked, rb: $('c_rb').checked, isoOnly: $('c_isoonly').checked, single: $('c_single').checked, logs: $('c_logs').checked, tm: $('c_tm').value, role: $('c_role').value, shell: $('c_shell').value, par: $('c_par').value, tags: $('c_tags').value, createTags: $('c_createTags').checked };
+      const cmd = { csv: $('c_csv').value, iso: $('c_iso').value, vc: $('c_vc').value, vcuser: $('c_vcuser').value, dns: $('c_dns').value, tls: $('c_tls').checked, rb: $('c_rb').checked, isoOnly: $('c_isoonly').checked, single: $('c_single').checked, logs: $('c_logs').checked, tm: $('c_tm').value, hwver: $('c_hwver').value, role: $('c_role').value, shell: $('c_shell').value, par: $('c_par').value, tags: $('c_tags').value, createTags: $('c_createTags').checked };
       const gen = Object.fromEntries(GEN_KEEP.map(id => [id, $(id).value]));
       localStorage.setItem(LS_KEY, JSON.stringify({ rows: state.rows, vbrs: state.vbrs, sizing: state.sizing, showHs: state.showHs, example: state.example, cmd, gen }));
     } catch (e) { /* storage unavailable: fine */ }
@@ -503,7 +504,7 @@
       state.vbrs = d.vbrs || {};
       state.sizing = Object.assign({ cpu: 6, ram: 12, disk: 120, data: 0 }, d.sizing || {});
       state.showHs = !!d.showHs; state.example = !!d.example;
-      if (d.cmd) { $('c_par').value = d.cmd.par || '1'; $('c_csv').value = d.cmd.csv || 'proxies.csv'; $('c_iso').value = d.cmd.iso || ''; $('c_vc').value = d.cmd.vc || ''; $('c_vcuser').value = d.cmd.vcuser || ''; $('c_dns').value = d.cmd.dns || ''; $('c_tls').checked = !!d.cmd.tls; $('c_rb').checked = !!d.cmd.rb; $('c_isoonly').checked = !!d.cmd.isoOnly; $('c_single').checked = d.cmd.single !== false; $('c_logs').checked = !!d.cmd.logs; $('c_tm').value = d.cmd.tm || 'Auto'; $('c_role').value = d.cmd.role || 'InfrastructureServerIscsi'; $('c_shell').value = d.cmd.shell || 'bash'; $('c_tags').value = d.cmd.tags || ''; $('c_createTags').checked = !!d.cmd.createTags; }
+      if (d.cmd) { $('c_par').value = d.cmd.par || '1'; $('c_csv').value = d.cmd.csv || 'proxies.csv'; $('c_iso').value = d.cmd.iso || ''; $('c_vc').value = d.cmd.vc || ''; $('c_vcuser').value = d.cmd.vcuser || ''; $('c_dns').value = d.cmd.dns || ''; $('c_tls').checked = !!d.cmd.tls; $('c_rb').checked = !!d.cmd.rb; $('c_isoonly').checked = !!d.cmd.isoOnly; $('c_single').checked = d.cmd.single !== false; $('c_logs').checked = !!d.cmd.logs; $('c_tm').value = d.cmd.tm || 'Auto'; $('c_hwver').value = d.cmd.hwver || ''; $('c_role').value = d.cmd.role || 'InfrastructureServerIscsi'; $('c_shell').value = d.cmd.shell || 'bash'; $('c_tags').value = d.cmd.tags || ''; $('c_createTags').checked = !!d.cmd.createTags; }
       if (d.gen) for (const id of GEN_KEEP) if (typeof d.gen[id] === 'string') $(id).value = d.gen[id];
       return true;
     } catch (e) { return false; }
@@ -825,7 +826,7 @@
       const a = `${base}${cont}-ApplianceSecretsFile ${pfx}${sec}${cont}-BaseIso ${pfx}${iso} -ValidateOnly${hw}`;
       const common = `${base}${cont}-vCenterServer ${vc}${vcUser ? ' -vCenterUser ' + vcUser : ''} -BaseIso ${pfx}${iso}${cont}-ApplianceSecretsFile ${pfx}${sec}${cont}-VBRServer ${vbr}${v.user ? ' -VBRUser ' + v.user : ''}` +
         ($('c_tls').checked ? ' -SkipTlsVerify' : '') + (v.mfa ? `${cont}-VBRMfaSecretFile ${pfx}${v.mfa}` : '') +
-        (tm !== 'Auto' ? ` -TransportMode ${tm}` : '') + (role !== 'InfrastructureServerIscsi' ? ` -ApplianceRole ${role}` : '') + hw + tagArg;
+        (tm !== 'Auto' ? ` -TransportMode ${tm}` : '') + (role !== 'InfrastructureServerIscsi' ? ` -ApplianceRole ${role}` : '') + hw + ($('c_hwver').value ? ` -HardwareVersion ${$('c_hwver').value}` : '') + tagArg;
       // Short hostnames + a search domain: the A records go into that zone (= the vbrname FQDN the VBR registers).
       const kr = state.rows.filter(r => r.vbr === k), zone = kr.every(r => r.hostname && !r.hostname.includes('.')) && kr[0] && kr[0][DS] ? kr[0][DS].split(/[,; ]+/)[0] : '';
       const dnsCmd = dns ? `pwsh -File .\\New-ProxyDnsRecords.ps1 -CsvPath .\\${csv} -Vbr ${k} -DnsServer ${dns}${zone ? ' -ZoneName ' + zone : ''} -Credential (Get-Credential) -WhatIf   # then without -WhatIf` : null;
@@ -977,7 +978,7 @@
     document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
     toast(`Downloading ${a.download}. If nothing happens (sandboxed viewer), use Copy CSV.`);
   });
-  ['c_csv', 'c_iso', 'c_vc', 'c_vcuser', 'c_dns', 'c_tls', 'c_rb', 'c_isoonly', 'c_single', 'c_logs', 'c_replace', 'c_replacePolicy', 'c_tm', 'c_role', 'c_shell', 'c_par', 'c_tags', 'c_createTags'].forEach(id => $(id).addEventListener('input', () => { renderCommands(); save(); }));
+  ['c_csv', 'c_iso', 'c_vc', 'c_vcuser', 'c_dns', 'c_tls', 'c_rb', 'c_isoonly', 'c_single', 'c_logs', 'c_replace', 'c_replacePolicy', 'c_hwver', 'c_tm', 'c_role', 'c_shell', 'c_par', 'c_tags', 'c_createTags'].forEach(id => $(id).addEventListener('input', () => { renderCommands(); save(); }));
   ['cmdOut', 'reportWrap'].forEach(id => $(id).addEventListener('click', (e) => { const b = e.target.closest('button[data-copy]'); if (!b) return; const pre = b.parentElement.nextElementSibling; if (pre) copyText(pre.textContent); }));
   document.querySelectorAll('[data-theme-choice]').forEach(b => b.addEventListener('click', () => setTheme(b.dataset.themeChoice)));
 
@@ -1080,7 +1081,7 @@
       csv: buildCsv(vbr), vbr, mode, iso: $('r_iso').value, settingsFile: $('r_settings').value,
       vcenter: { server: $('r_vc').value.trim(), user: $('r_vcuser').value.trim(), password: $('r_vcpass').value },
       vbrServer: { server: $('r_vbrsrv').value.trim(), user: $('r_vbruser').value.trim(), password: $('r_vbrpass').value, mfaFile: $('r_mfa').value },
-      transportMode: $('c_tm').value, applianceRole: $('c_role').value, rollbackOnFailure: $('c_rb').checked, skipTls: $('c_tls').checked,
+      transportMode: $('c_tm').value, hardwareVersion: $('c_hwver').value, applianceRole: $('c_role').value, rollbackOnFailure: $('c_rb').checked, skipTls: $('c_tls').checked,
       parallel: Math.min(16, Math.max(1, parseInt($('c_par').value, 10) || 1)),
       replace: $('c_replace').checked, replaceJobPolicy: $('c_replacePolicy').value,
       tags: tagPairs().ok.join('\n'), createMissingTags: $('c_createTags').checked,

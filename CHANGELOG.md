@@ -2,6 +2,11 @@
 
 ## 1.3.2 - unreleased
 
+- **VM hardware version no longer taken from the cluster default.** New-VM used the cluster's default VM
+  compatibility; at ESXi 6.0 (vmx-11) vCenter refuses the `rhel9_64Guest` guest OS ("not supported on the host at
+  hardware version"). Without `-HardwareVersion`, the deploy (and `New-DeployServerVm.ps1`) now takes the newest
+  hardware version the target host can create that knows the guest OS (ESXi 8.0 U2+ = vmx-21). The planner has a
+  "VM hardware" choice (Auto / vmx-21 / vmx-20 / vmx-19). Customer, 2026-11-06.
 - **`-Replace` safe to rerun after a half-done release.** If a job update failed part-way through releasing the old
   proxy, the rerun captured only the jobs still pinned to it and lost those already unpinned, so the new proxy
   was never pinned back there. The rerun now keeps the earlier manifest's job lists (minus the old proxy id) and
