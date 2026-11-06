@@ -2920,6 +2920,33 @@ function Remove-IsoFromDatastore {
 # ---------------------------------------------------------------------------
 # Stage A - vSphere deploy (build ISO -> create UEFI VM -> attach -> wait -> detach)
 # ---------------------------------------------------------------------------
+function Resolve-VmHardwareVersion {
+    # Without -HardwareVersion, New-VM takes the cluster's default VM compatibility, which can be far older than
+    # the hosts: ESXi 6.0 (vmx-11) refuses rhel9_64Guest (customer, 2026-11-06). Take the NEWEST version this host
+    # can create (ESXi 8.0 U2+ = vmx-21) that knows the guest OS. $null = leave it to vCenter (lookup failed).
+    param([Parameter(Mandatory)]$VMHost, [Parameter(Mandatory)][string]$GuestId)
+    try {
+        $cr = Get-View -Id $VMHost.ExtensionData.Parent -Property EnvironmentBrowser -ErrorAction Stop
+        $eb = Get-View -Id $cr.EnvironmentBrowser -ErrorAction Stop
+        $hostRef = $VMHost.ExtensionData.MoRef
+        $keys = @($eb.QueryConfigOptionDescriptor() | Where-Object {
+                $_.CreateSupported -and $_.Key -match '^vmx-\d+$' -and (-not $_.Host -or @($_.Host | Where-Object { $_.Value -eq $hostRef.Value }).Count) } |
+            Sort-Object { [int]($_.Key -replace '^vmx-') } -Descending | ForEach-Object { $_.Key })
+        foreach ($k in $keys) {
+            $spec = New-Object VMware.Vim.EnvironmentBrowserConfigOptionQuerySpec
+            $spec.Key = $k; $spec.GuestId = @($GuestId); $spec.Host = $hostRef
+            $opt = $eb.QueryConfigOptionEx($spec)
+            if ($opt -and @($opt.GuestOSDescriptor | Where-Object { $_.Id -eq $GuestId }).Count) {
+                Write-Log "VM hardware version $k (newest on $($VMHost.Name) that supports $GuestId; -HardwareVersion overrides)." 'INFO'
+                return $k
+            }
+        }
+        Write-Log "No hardware version on $($VMHost.Name) lists guest OS '$GuestId' - leaving it to vCenter (pass -HardwareVersion, or -GuestId)." 'WARN'
+    }
+    catch { Write-Log "Could not read the hardware versions of $($VMHost.Name) ($($_.Exception.Message)) - leaving it to vCenter's default; pass -HardwareVersion vmx-NN if New-VM refuses the guest OS." 'WARN' }
+    return $null
+}
+
 function Get-PortGroupByName {
     # Resolve a CSV 'portgroup' value to an object New-VM accepts (VirtualPortGroupBase): a standard
     # port group - on the chosen host when one is given, since standard port groups exist per host -
@@ -3131,7 +3158,8 @@ function Invoke-StageA-Deploy {
             CD                = $true
         }
         if ($location)        { $newVmParams.Location        = $location }
-        if ($HardwareVersion) { $newVmParams.HardwareVersion = $HardwareVersion }
+        $hw = if ($HardwareVersion) { $HardwareVersion } else { Resolve-VmHardwareVersion -VMHost $vmhost -GuestId $GuestId }
+        if ($hw) { $newVmParams.HardwareVersion = $hw }
         $vm = New-VM @newVmParams
         if ($script:Owned) { $script:Owned.VmId = $vm.Id }
 

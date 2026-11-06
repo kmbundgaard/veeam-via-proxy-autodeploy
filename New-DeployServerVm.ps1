@@ -38,12 +38,40 @@ param(
     # upload over a weak VPN): skip the upload. Its size must match -IsoPath, so a stale copy is refused.
     # With -SeedIsoPath this applies to both ISOs.
     [switch]$UseUploadedIso,
+    [string]$HardwareVersion,   # e.g. vmx-21; default: the newest the host supports that knows rhel9_64Guest
     [switch]$KeepIso
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 function Log { param([string]$m, [string]$l = 'INFO') $c = switch ($l) { 'OK' { 'Green' } 'WARN' { 'Yellow' } 'ERROR' { 'Red' } default { 'Gray' } }; Write-Host ("[{0}] [{1,-5}] {2}" -f (Get-Date).ToString('HH:mm:ss'), $l, $m) -ForegroundColor $c }
 function Test-Tcp { param([string]$TargetHost, [int]$Port) $c = [System.Net.Sockets.TcpClient]::new(); try { $iar = $c.BeginConnect($TargetHost, $Port, $null, $null); if (-not $iar.AsyncWaitHandle.WaitOne(3000)) { return $false }; $c.EndConnect($iar); return $true } catch { return $false } finally { $c.Close() } }
+
+function Resolve-VmHardwareVersion {
+    # Without -HardwareVersion, New-VM takes the cluster's default VM compatibility, which can be far older than
+    # the hosts: ESXi 6.0 (vmx-11) refuses rhel9_64Guest (customer, 2026-11-06). Take the NEWEST version this host
+    # can create (ESXi 8.0 U2+ = vmx-21) that knows the guest OS. $null = leave it to vCenter (lookup failed).
+    param([Parameter(Mandatory)]$VMHost, [Parameter(Mandatory)][string]$GuestId)
+    try {
+        $cr = Get-View -Id $VMHost.ExtensionData.Parent -Property EnvironmentBrowser -ErrorAction Stop
+        $eb = Get-View -Id $cr.EnvironmentBrowser -ErrorAction Stop
+        $hostRef = $VMHost.ExtensionData.MoRef
+        $keys = @($eb.QueryConfigOptionDescriptor() | Where-Object {
+                $_.CreateSupported -and $_.Key -match '^vmx-\d+$' -and (-not $_.Host -or @($_.Host | Where-Object { $_.Value -eq $hostRef.Value }).Count) } |
+            Sort-Object { [int]($_.Key -replace '^vmx-') } -Descending | ForEach-Object { $_.Key })
+        foreach ($k in $keys) {
+            $spec = New-Object VMware.Vim.EnvironmentBrowserConfigOptionQuerySpec
+            $spec.Key = $k; $spec.GuestId = @($GuestId); $spec.Host = $hostRef
+            $opt = $eb.QueryConfigOptionEx($spec)
+            if ($opt -and @($opt.GuestOSDescriptor | Where-Object { $_.Id -eq $GuestId }).Count) {
+                Log "VM hardware version $k (newest on $($VMHost.Name) that supports $GuestId; -HardwareVersion overrides)." 'INFO'
+                return $k
+            }
+        }
+        Log "No hardware version on $($VMHost.Name) lists guest OS '$GuestId' - leaving it to vCenter (pass -HardwareVersion, or -GuestId)." 'WARN'
+    }
+    catch { Log "Could not read the hardware versions of $($VMHost.Name) ($($_.Exception.Message)) - leaving it to vCenter's default; pass -HardwareVersion vmx-NN if New-VM refuses the guest OS." 'WARN' }
+    return $null
+}
 
 $core = Get-Module -ListAvailable VMware.VimAutomation.Core | Sort-Object Version -Descending | Select-Object -First 1
 if (-not $core) { throw 'PowerCLI (VMware.VimAutomation.Core) is not installed.' }
@@ -88,6 +116,8 @@ try {
     if ($PSCmdlet.ShouldProcess($Name, "New-VM $Cpu vCPU / $MemoryGB GB / $DiskGB GB, UEFI + Secure Boot, boot the installer")) {
         $p = @{ Name = $Name; VMHost = $vmhost; Datastore = $ds; NumCpu = $Cpu; MemoryGB = $MemoryGB; DiskGB = $DiskGB; DiskStorageFormat = 'Thin'; GuestId = 'rhel9_64Guest'; Portgroup = $pg; CD = $true }
         if ($loc) { $p.Location = $loc }
+        $hw = if ($HardwareVersion) { $HardwareVersion } else { Resolve-VmHardwareVersion -VMHost $vmhost -GuestId 'rhel9_64Guest' }
+        if ($hw) { $p.HardwareVersion = $hw }
         $vm = New-VM @p
         $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
         $spec.Firmware = [VMware.Vim.GuestOsDescriptorFirmwareType]::efi

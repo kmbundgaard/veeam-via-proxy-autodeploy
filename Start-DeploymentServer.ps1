@@ -434,6 +434,8 @@ function New-Run {
     $dat = & $int 'dataDiskGB' 0 65536
     if ($dat) { if ($dat -lt 120) { throw 'The extra data disk must be 120 GB or more (Veeam minimum for the data disk).' }; $a.Add('-MultiDisk'); $a.Add("-VmDataDiskGB $dat") }
     if (-not $vsa -and (Get-Field $Req 'logsOnDataDisk')) { if (-not $dat) { throw 'Logs on disk 2 needs an extra data disk.' }; $a.Add('-LogsOnDataDisk') }
+    $hwv = [string](Get-Field $Req 'hardwareVersion')
+    if ($hwv) { if ($hwv -notmatch '^vmx-\d{2}$') { throw 'Bad VM hardware version (expected vmx-NN).' }; $a.Add("-HardwareVersion $hwv") }
     if (-not $vsa -and (Get-Field $Req 'replace') -and $mode -in @('Full', 'RegisterOnly', 'WhatIf')) {
         # Replace mode: capture job pinning -> remove old proxy/host -> (redeploy) -> register -> re-pin.
         $a.Add('-Replace')
