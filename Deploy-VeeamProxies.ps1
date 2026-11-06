@@ -2277,6 +2277,29 @@ function Initialize-IsoWorkspace {
     }
 }
 
+function Get-DnsSearchPostBlock {
+    # %post (chroot, NetworkManager not running): add the DNS search domains to the installed profile that holds
+    # NIC 1's static address - keyfile (/etc/NetworkManager/system-connections) or ifcfg, whichever anaconda wrote.
+    param([Parameter(Mandatory)][string]$Ip, [Parameter(Mandatory)][string]$Search)
+    $list = ($Search -split ',' | Where-Object { $_ })
+    $kf = ($list -join ';') + ';'; $ifc = $list -join ' '
+    $nl = "`n"
+    return ('# >>> veeam-autodeploy (generated): DNS search domain on NIC 1 (13.0.x: not a kickstart option there) >>>' + $nl +
+        '_vad_srch=0' + $nl +
+        'for f in /etc/NetworkManager/system-connections/*.nmconnection; do' + $nl +
+        '  [ -f "$f" ] || continue' + $nl +
+        "  grep -Eq '^address[0-9]*=$([regex]::Escape($Ip))/' `"`$f`" || continue" + $nl +
+        "  sed -i '/^dns-search=/d' `"`$f`"; sed -i '/^\[ipv4\]/a dns-search=$kf' `"`$f`"; _vad_srch=1" + $nl +
+        'done' + $nl +
+        'for f in /etc/sysconfig/network-scripts/ifcfg-*; do' + $nl +
+        '  [ -f "$f" ] || continue' + $nl +
+        "  grep -Eq '^IPADDR[0-9]*=`"?$([regex]::Escape($Ip))`"?$' `"`$f`" || continue" + $nl +
+        "  sed -i '/^DOMAIN=/d' `"`$f`"; echo 'DOMAIN=`"$ifc`"' >> `"`$f`"; _vad_srch=1" + $nl +
+        'done' + $nl +
+        '_vad_log "veeam-autodeploy: DNS search domain ' + $ifc + ' $( [ $_vad_srch = 1 ] && echo set || echo NOT set - no profile with ' + $Ip + ' found)"' + $nl +
+        '# <<< veeam-autodeploy DNS search <<<' + $nl)
+}
+
 function Build-KickstartPost {
     # The documented "Automating Installation with Initial Configuration" block, inserted INSIDE
     # the appliance's own %post (between %post and '# post end'): disable the interactive init
@@ -2417,7 +2440,11 @@ function Get-PatchedApplianceConfigs {
     $netLine = $netLine.Trim()
     # Optional CSV column dnssearch (search domains, ',' or ';'-separated) -> anaconda --ipv4-dns-search.
     $srch = if (-not $prompt -and $Row.PSObject.Properties['dnssearch']) { (([string]$Row.dnssearch) -split '[,; ]+' | Where-Object { $_ }) -join ',' } else { '' }
-    if ($srch) { $netLine += " --ipv4-dns-search=$srch" }
+    # The 13.0.x VIA installs from Rocky 9.2, whose anaconda (34.25) does not know --ipv4-dns-search and stops with
+    # "unrecognized arguments" (customer, 2026-11-06). There the search domain is written into the installed
+    # system's NIC 1 profile from the %post block instead (Get-DnsSearchPostBlock).
+    $srchInPost = ($srch -and $script:IsoLayout -eq '13.0')
+    if ($srch -and -not $srchInPost) { $netLine += " --ipv4-dns-search=$srch" }
 
     $ksText = (Get-Content -Raw $exKs) -replace "`r`n", "`n"
     $rxNet = [regex]'(?m)^[ \t]*network[ \t]+--bootproto=\S+.*$'
@@ -2426,7 +2453,7 @@ function Get-PatchedApplianceConfigs {
     # anaconda refuses --ipv4-dns-search without --device ("Option --ipv4-dns-search requires --device to be
     # specified", installer terminates; lab 2026-10-28). Two-NIC and prompt lines name the device below; a
     # single adapter takes 'link' (the first adapter with a link), as the deployment server's own kickstart.
-    if ($srch -and -not $nic2 -and $netLine -notmatch '--device=') { $netLine = $netLine.Replace('--bootproto=static', '--bootproto=static --device=link') }
+    if ($srch -and -not $srchInPost -and -not $nic2 -and $netLine -notmatch '--device=') { $netLine = $netLine.Replace('--bootproto=static', '--bootproto=static --device=link') }
     if ($prompt) {
         # Generic ISO: ask for name + network on the console before the VIA writes its network file.
         $rxCat = [regex]'(?m)^[ \t]*cat[ \t]*<<[ \t]*EOF[ \t]*>[ \t]*/tmp/pre-network\.cfg[ \t]*$'
@@ -2436,6 +2463,12 @@ function Get-PatchedApplianceConfigs {
         $ask = ConvertTo-RenderedTemplate -TemplatePath (Join-Path $SharedArtifacts.TemplateDir 'prompt-network.sh.template') -Tokens @{
             DEF_MASK = $d.netmask; DEF_GW = $d.gateway; DEF_DNS = $d.dns; DEF_SEARCH = $d.dnssearch; DEF_MASK2 = $d.netmask2 }
         $ask = ($ask -replace "`r`n", "`n").TrimEnd("`n") + "`n"
+        if ($script:IsoLayout -eq '13.0') {
+            # 13.0.x anaconda has no --ipv4-dns-search (see above), and the value typed in %pre is not visible to
+            # the chrooted %post: the generic 13.0.x ISO sets no search domain.
+            $ask = [regex]::Replace($ask, '(?m)^\[ -n "\$VAD_SEARCH" \].*VAD_SRCH_OPT=.*\n', '')
+            Write-Log "13.0.x generic ISO: a DNS search domain typed at install is not applied (13.0.x installer limitation) - set it later in the Host Management Console." 'WARN'
+        }
         $netLine = $netLine.Replace('--bootproto=static', '--bootproto=static --device=${VAD_NIC1}') + ' ${VAD_SRCH_OPT}' + "`n" + '${VAD_NET2}'
         $ksText = $rxCat.Replace($ksText, { param($m) $ask + $m.Value }, 1)
     }
@@ -2488,6 +2521,7 @@ echo "veeam-autodeploy: NIC1=${VAD_NIC1} NIC2=${VAD_NIC2}"
     #    order: the line the Veeam docs name, then the anchor community tooling uses on the 13.x
     #    VIA kickstart, then the documented end-of-post marker.
     $block = Build-KickstartPost -SharedArtifacts $SharedArtifacts -LogsDir $(if ($LogsOnDataDisk) { $script:VeeamLogsDataDir } else { '' })
+    if ($srchInPost) { $block = $block.TrimEnd("`n") + "`n" + (Get-DnsSearchPostBlock -Ip ([string]$Row.ip) -Search $srch) }
     $anchors = @(
         @{ Name = 'log "Veeam post install commands" (documented)'; Rx = '(?m)^[ \t]*log[ \t]+"Veeam post install commands"[ \t]*$'; Mode = 'after' },
         @{ Name = 'mkdir -p /var/log/veeam/ (fallback)';            Rx = '(?m)^[ \t]*mkdir[ \t]+-p[ \t]+/var/log/veeam/?[ \t]*$';        Mode = 'after' },
