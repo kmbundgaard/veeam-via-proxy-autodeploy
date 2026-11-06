@@ -2,6 +2,13 @@
 
 ## 1.3.2 - unreleased
 
+- **Job update refused by the VBR: "'Credentials Per Machine' must not be empty".** The VBR returns a job whose
+  guest-processing credentials carry an empty per-machine list and then refuses that same model on PUT, so
+  re-pinning a job's proxy list (`-Replace`) failed. When every such list in the job is empty, the update is
+  retried once without the list and once with it as `[]`; a list with entries is never touched. If the VBR still
+  refuses, the run names the job and what to check in the console. Customer, 2026-11-06.
+- **Planner page no longer widens on Run.** A long line in the run log stretched the panel and the whole page
+  (grid items default to `min-width: auto`); the log now scrolls inside its box.
 - **vSphere inventory with distributed switches fixed.** "Load inventory" failed with "The property 'VlanId'
   cannot be found on this object" as soon as the vCenter had a distributed switch: only a single-VLAN port group
   has `VlanId`; a trunk (every VDS's uplink port group), a private VLAN and VLAN type None do not, and the server
