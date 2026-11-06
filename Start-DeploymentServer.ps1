@@ -89,6 +89,16 @@ function Write-SecretFile { param([string]$Path, [string]$Text)
     [System.IO.File]::WriteAllText($Path, (Protect-Text $Text), [System.Text.UTF8Encoding]::new($false))
     if (-not $IsWindows) { & chmod 600 $Path } }
 
+# VLAN of a distributed port group as text, for any VlanConfiguration type (StrictMode-safe):
+# single VLAN -> '120', trunk -> 'trunk 0-4094', private VLAN -> 'pvlan 201', none -> ''.
+function Get-VdPortgroupVlan { param($Cfg)
+    if ($null -eq $Cfg) { return '' }
+    $p = $Cfg.PSObject.Properties
+    if ($p['VlanId'])        { return [string]$Cfg.VlanId }
+    if ($p['PrivateVlanId']) { return "pvlan $($Cfg.PrivateVlanId)" }
+    if ($p['Ranges'])        { return 'trunk ' + ((@($Cfg.Ranges) | ForEach-Object { if ($_.PSObject.Properties['StartVlanId']) { "$($_.StartVlanId)-$($_.EndVlanId)" } else { [string]$_ } }) -join ',') }
+    return [string]$Cfg }
+
 # --- appliance settings files: check on upload, keep a NON-secret summary next to the encrypted file ---------
 function Test-SettingsText {
     # A first-line check of an uploaded settings file (the deploy script's Test-ApplianceSecrets does the
@@ -529,7 +539,12 @@ function Handle-Request { param($Ctx)
                     # command-not-found error that -ErrorAction cannot swallow (deploy01, 2026-09-25) - check first.
                     $hasVds = [bool](Get-Command Get-VDPortgroup -ErrorAction SilentlyContinue)
                     $pgs = @(Get-VirtualPortGroup -Server $vi -Standard -ErrorAction SilentlyContinue | ForEach-Object { [ordered]@{ name = $_.Name; kind = 'standard'; vlan = $_.VLanId } })
-                    if ($hasVds) { $pgs += @(Get-VDPortgroup -Server $vi -ErrorAction SilentlyContinue | ForEach-Object { [ordered]@{ name = $_.Name; kind = 'distributed'; vlan = $_.VlanConfiguration.VlanId } }) }
+                    # VlanConfiguration has a VlanId only for a single VLAN: a trunk has Ranges, a private VLAN
+                    # PrivateVlanId, VLAN type 'None' is $null. Reading .VlanId on a trunk threw under StrictMode
+                    # and failed the whole scan - every VDS has a trunk, its uplink port group (customer, 2026-11-06).
+                    # Uplink port groups are left out: a VM is never attached to one.
+                    if ($hasVds) { $pgs += @(Get-VDPortgroup -Server $vi -ErrorAction SilentlyContinue | Where-Object { -not ($_.PSObject.Properties['IsUplink'] -and $_.IsUplink) } |
+                            ForEach-Object { [ordered]@{ name = $_.Name; kind = 'distributed'; vlan = Get-VdPortgroupVlan $_.VlanConfiguration } }) }
                     $inv = [ordered]@{
                         vcenter = "$($vi.Name) (vCenter $($vi.Version))"
                         clusters = @(Get-Cluster -Server $vi | ForEach-Object { $h = @($_ | Get-VMHost); [ordered]@{ name = $_.Name; hosts = $h.Count; freeMemGB = [math]::Round(($h | Measure-Object -Property MemoryTotalGB -Sum).Sum - ($h | Measure-Object -Property MemoryUsageGB -Sum).Sum) } })
