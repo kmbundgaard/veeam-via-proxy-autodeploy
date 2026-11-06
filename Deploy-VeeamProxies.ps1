@@ -1240,7 +1240,38 @@ function Set-VbrRestJobProxyList {
     if (-not $node) { throw "Job '$($job.name)': '$Path' not found in the job model." }
     $node.autoSelectEnabled = $AutoSelect
     $node.proxyIds = @($ProxyIds)
-    Invoke-VbrRest -Method PUT -Path ("/api/v1/jobs/{0}" -f [uri]::EscapeDataString($JobId)) -Body $job | Out-Null
+    $put = "/api/v1/jobs/{0}" -f [uri]::EscapeDataString($JobId)
+    try { Invoke-VbrRest -Method PUT -Path $put -Body $job | Out-Null }
+    catch {
+        # The VBR hands out a job model it then refuses on PUT: guest credentials with an EMPTY per-machine list
+        # -> "'Credentials Per Machine' must not be empty" (customer, 2026-11-06). Only when every such list in the
+        # model is empty (nothing to lose): retry once without the list, then once with it as []. A list that
+        # has entries is never touched.
+        if ($_.Exception.Message -notmatch 'Credentials Per Machine') { throw }
+        $holders = @(Find-JsonProperty -Object $job -Name 'credentialsPerMachine')
+        if (-not $holders.Count -or @($holders | Where-Object { @($_.credentialsPerMachine | Where-Object { $_ }).Count }).Count) { throw }
+        Write-Log "Job '$($job.name)': VBR refused its own model (empty per-machine guest credentials) - retrying without that empty list." 'WARN'
+        foreach ($h in $holders) { $h.PSObject.Properties.Remove('credentialsPerMachine') }
+        try { Invoke-VbrRest -Method PUT -Path $put -Body $job | Out-Null; return }
+        catch { if ($_.Exception.Message -notmatch 'Credentials Per Machine') { throw } }
+        foreach ($h in $holders) { $h | Add-Member -NotePropertyName credentialsPerMachine -NotePropertyValue @() -Force }
+        try { Invoke-VbrRest -Method PUT -Path $put -Body $job | Out-Null }
+        catch {
+            if ($_.Exception.Message -notmatch 'Credentials Per Machine') { throw }
+            throw ("Job '$($job.name)': the VBR refuses to save this job over REST ('Credentials Per Machine' must not be empty), " +
+                "even unchanged apart from the proxy list. In the VBR console open the job > Guest Processing > Credentials, " +
+                "check the per-machine credentials (add one or switch them off), save the job, then re-run. Original: $($_.Exception.Message)")
+        }
+    }
+}
+
+function Find-JsonProperty {
+    # Every object (at any depth) in a ConvertFrom-Json tree that has a property named $Name.
+    param($Object, [Parameter(Mandatory)][string]$Name)
+    if ($null -eq $Object -or $Object -is [string] -or $Object -is [ValueType]) { return }
+    if ($Object -is [System.Collections.IEnumerable]) { foreach ($i in $Object) { Find-JsonProperty -Object $i -Name $Name }; return }
+    if ($Object.PSObject.Properties[$Name]) { $Object }
+    foreach ($p in $Object.PSObject.Properties) { if ($p.Name -ne $Name) { Find-JsonProperty -Object $p.Value -Name $Name } }
 }
 
 function Get-VbrRestProxyById { param([Parameter(Mandatory)][string]$ProxyId) Invoke-VbrRest -Method GET -Path ("/api/v1/backupInfrastructure/proxies/{0}" -f [uri]::EscapeDataString($ProxyId)) }
