@@ -2,6 +2,11 @@
 
 ## 1.3.2 - unreleased
 
+- **vSphere inventory with distributed switches fixed.** "Load inventory" failed with "The property 'VlanId'
+  cannot be found on this object" as soon as the vCenter had a distributed switch: only a single-VLAN port group
+  has `VlanId`; a trunk (every VDS's uplink port group), a private VLAN and VLAN type None do not, and the server
+  runs under StrictMode. The VLAN is now read for every type (`120`, `trunk 0-4094`, `pvlan 201`, empty) and
+  uplink port groups are no longer listed. Found at a customer, 2026-11-06.
 - **`Get-DeployServerMedia.ps1`: one download for a dark site.** On any machine with internet (Windows
   PowerShell 5.1 or pwsh 7) it fetches the Rocky minimal ISO, the seven RPMs, PowerCLI and the PowerShell 7 MSI
   for the build host into one folder (`iso\`, `rpms\`, `PowerCLI\`, `tools\`, empty `veeam-iso\` and `keys\`),
